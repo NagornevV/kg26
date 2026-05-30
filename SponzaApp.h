@@ -6,6 +6,9 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <array>
+#include "GBuffer.h"
+#include "RenderingSystem.h"
 
 using namespace DirectX;
 
@@ -28,10 +31,7 @@ struct CBPerObject
 {
     XMFLOAT4X4 World;
     XMFLOAT4X4 ViewProj;
-    XMFLOAT3   LightDir;    float Pad0;
-    XMFLOAT3   LightColor;  float Pad1;
-    XMFLOAT3   EyePos;      float Pad2;
-    XMFLOAT3   ObjectColor; float Pad3;
+    XMFLOAT3   ObjectColor; float Pad0;
     XMFLOAT2   UVScale;
     XMFLOAT2   UVOffset;
 };
@@ -60,10 +60,10 @@ protected:
 private:
     void BuildDescriptorHeap();
     void BuildConstantBuffer();
-    void BuildRootSignature();
     void BuildShadersAndInputLayout();
     void BuildGeometry();
-    void BuildPSO();
+    void BuildRenderingSystem();
+    void BuildLights();
 
     void LoadModel(const std::string& objPath);
     bool LoadTexture(const std::string& path, int heapIndex);
@@ -76,6 +76,10 @@ private:
 
 private:
     static const int kMaxTextures = 128;
+    static const int kGBufferSrvStart = 2 + kMaxTextures;
+    static const int kLightCbvIndex = kGBufferSrvStart + GBuffer::BufferCount;
+    static const int kTotalSrvSlots = kLightCbvIndex + 1;
+
     ComPtr<ID3D12DescriptorHeap> mSrvHeap;
 
     std::vector<ComPtr<ID3D12Resource>>  mTextures;
@@ -94,12 +98,10 @@ private:
     ComPtr<ID3D12Resource> mConstantBuffer;
     BYTE* mCbMappedData = nullptr;
 
-    ComPtr<ID3D12RootSignature>           mRootSignature;
-    ComPtr<ID3D12PipelineState>           mPSO;          // обычный solid
-    ComPtr<ID3D12PipelineState>           mPSOWireframe; // каркасный
-    ComPtr<ID3DBlob>                      mVsByteCode;
-    ComPtr<ID3DBlob>                      mPsByteCode;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+    GBuffer mGBuffer;
+    RenderingSystem mRenderingSystem;
+    CBFrameLights mLights = {};
 
     // Флаг wireframe режима — переключается кнопкой F
     bool mWireframe = false;

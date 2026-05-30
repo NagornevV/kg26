@@ -44,16 +44,18 @@ public:
 
     bool Initialize() override;
 
-    // Вызываются из MsgProc
     void OnMouseDown(WPARAM btnState, int x, int y);
     void OnMouseUp(WPARAM btnState, int x, int y);
     void OnMouseMove(WPARAM btnState, int x, int y);
     void OnMouseWheel(short delta);
 
+    // Клавиатура — переключение wireframe
+    void OnKeyboardInput(WPARAM key) override;
+
 protected:
     void OnResize() override;
     void Update(const GameTimer& gt) override;
-    void Draw(const GameTimer& gt) override;
+    void Draw(const GameTimer& gt)   override;
 
 private:
     void BuildDescriptorHeap();
@@ -68,9 +70,9 @@ private:
     void CreateWhiteTexture();
 
     void UploadBufferData(ComPtr<ID3D12Resource>& dest,
-                          ComPtr<ID3D12Resource>& upload,
-                          const void* data, UINT byteSize,
-                          D3D12_RESOURCE_STATES finalState);
+        ComPtr<ID3D12Resource>& upload,
+        const void* data, UINT byteSize,
+        D3D12_RESOURCE_STATES finalState);
 
 private:
     static const int kMaxTextures = 128;
@@ -90,29 +92,33 @@ private:
     std::vector<SubMesh>     mSubMeshes;
 
     ComPtr<ID3D12Resource> mConstantBuffer;
-    BYTE*                  mCbMappedData = nullptr;
+    BYTE* mCbMappedData = nullptr;
 
     ComPtr<ID3D12RootSignature>           mRootSignature;
-    ComPtr<ID3D12PipelineState>           mPSO;
+    ComPtr<ID3D12PipelineState>           mPSO;          // обычный solid
+    ComPtr<ID3D12PipelineState>           mPSOWireframe; // каркасный
     ComPtr<ID3DBlob>                      mVsByteCode;
     ComPtr<ID3DBlob>                      mPsByteCode;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
-    // --- Камера ---
-    float    mYaw    =  0.f;
-    float    mPitch  = -0.1f;
-    float    mRadius =  1000.f;  // расстояние от центра (колесико)
+    // Флаг wireframe режима — переключается кнопкой F
+    bool mWireframe = false;
+
+    // Камера
+    float    mYaw = 0.f;
+    float    mPitch = -0.1f;
+    float    mRadius = 1000.f;
     XMFLOAT3 mEyePos = { 0.f, 200.f, -1000.f };
 
-    // --- Мышь ---
+    // Мышь
     bool  mMouseDown = false;
     POINT mLastMouse = {};
     float mMouseSens = 0.005f;
     float mZoomSpeed = 50.f;
 
-    // --- UV ---
-    XMFLOAT2 mUVScale       = { 2.f, 2.f };
-    XMFLOAT2 mUVOffset      = { 0.f, 0.f };
+    // UV
+    XMFLOAT2 mUVScale = { 2.f, 2.f };
+    XMFLOAT2 mUVOffset = { 0.f, 0.f };
     float    mUVScrollSpeed = 0.05f;
 
     XMFLOAT4X4 mProj = {};

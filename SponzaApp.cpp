@@ -19,7 +19,7 @@ static void ThrowIfFailed(HRESULT hr)
 SponzaApp::SponzaApp(HINSTANCE hInstance)
     : D3DApp(hInstance)
 {
-    mMainWndCaption = L"Sponza — DX12 | ЛКМ: вращение | Колесико: зум";
+    mMainWndCaption = L"Sponza — DX12 | ЛКМ: вращение | Колесико: зум | F: wireframe";
 }
 
 SponzaApp::~SponzaApp()
@@ -73,13 +73,22 @@ void SponzaApp::OnResize()
 }
 
 // =============================================================
-//  Управление мышью
+//  Клавиатура — F переключает wireframe
+// =============================================================
+void SponzaApp::OnKeyboardInput(WPARAM key)
+{
+    if (key == 'F')
+        mWireframe = !mWireframe;
+}
+
+// =============================================================
+//  Мышь
 // =============================================================
 void SponzaApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
-    mMouseDown    = true;
-    mLastMouse.x  = x;
-    mLastMouse.y  = y;
+    mMouseDown = true;
+    mLastMouse.x = x;
+    mLastMouse.y = y;
     SetCapture(mhMainWnd);
 }
 
@@ -96,59 +105,52 @@ void SponzaApp::OnMouseMove(WPARAM btnState, int x, int y)
         int dx = x - (int)mLastMouse.x;
         int dy = y - (int)mLastMouse.y;
 
-        mYaw   += dx * mMouseSens;
+        mYaw += dx * mMouseSens;
         mPitch += dy * mMouseSens;
 
-        // Ограничиваем pitch чтобы не перевернуться
         const float limit = XM_PIDIV2 - 0.01f;
-        if (mPitch >  limit) mPitch =  limit;
+        if (mPitch > limit) mPitch = limit;
         if (mPitch < -limit) mPitch = -limit;
     }
-
     mLastMouse.x = x;
     mLastMouse.y = y;
 }
 
 void SponzaApp::OnMouseWheel(short delta)
 {
-    // delta > 0 — крутим от себя = приближаем
     mRadius -= delta * mZoomSpeed * 0.01f;
-
-    // Ограничиваем расстояние
-    if (mRadius < 100.f)   mRadius = 100.f;
-    if (mRadius > 3000.f)  mRadius = 3000.f;
+    if (mRadius < 100.f)  mRadius = 100.f;
+    if (mRadius > 3000.f) mRadius = 3000.f;
 }
 
 // =============================================================
 void SponzaApp::Update(const GameTimer& gt)
 {
-    // Позиция камеры из сферических координат (yaw + pitch + radius)
     mEyePos = {
         mRadius * cosf(mPitch) * sinf(mYaw),
-        mRadius * sinf(mPitch) + 100.f,     // +100 чтобы не уходить под пол
+        mRadius * sinf(mPitch) + 100.f,
         mRadius * cosf(mPitch) * cosf(mYaw)
     };
 
     XMMATRIX world = XMMatrixIdentity();
-    XMMATRIX view  = XMMatrixLookAtLH(
+    XMMATRIX view = XMMatrixLookAtLH(
         XMLoadFloat3(&mEyePos),
         XMVectorSet(0.f, 100.f, 0.f, 0.f),
-        XMVectorSet(0.f,   1.f, 0.f, 0.f));
+        XMVectorSet(0.f, 1.f, 0.f, 0.f));
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
 
-    // Анимация UV
-    mUVOffset.x = fmodf(gt.TotalTime() * mUVScrollSpeed,        1.f);
+    mUVOffset.x = fmodf(gt.TotalTime() * mUVScrollSpeed, 1.f);
     mUVOffset.y = fmodf(gt.TotalTime() * mUVScrollSpeed * 0.5f, 1.f);
 
     CBPerObject cb = {};
-    XMStoreFloat4x4(&cb.World,    XMMatrixTranspose(world));
+    XMStoreFloat4x4(&cb.World, XMMatrixTranspose(world));
     XMStoreFloat4x4(&cb.ViewProj, XMMatrixTranspose(view * proj));
-    cb.LightDir    = { 0.3f, -1.f, 0.5f };
-    cb.LightColor  = { 1.f,  1.f,  1.f  };
-    cb.EyePos      = mEyePos;
+    cb.LightDir = { 0.3f, -1.f, 0.5f };
+    cb.LightColor = { 1.f,  1.f,  1.f };
+    cb.EyePos = mEyePos;
     cb.ObjectColor = { 1.f, 1.f, 1.f };
-    cb.UVScale     = mUVScale;
-    cb.UVOffset    = mUVOffset;
+    cb.UVScale = mUVScale;
+    cb.UVOffset = mUVOffset;
 
     memcpy(mCbMappedData, &cb, sizeof(CBPerObject));
 }
@@ -156,8 +158,11 @@ void SponzaApp::Update(const GameTimer& gt)
 // =============================================================
 void SponzaApp::Draw(const GameTimer& gt)
 {
+    // Выбираем PSO в зависимости от режима
+    auto* currentPSO = mWireframe ? mPSOWireframe.Get() : mPSO.Get();
+
     ThrowIfFailed(mDirectCmdListAlloc->Reset());
-    ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), mPSO.Get()));
+    ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), currentPSO));
 
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -227,12 +232,13 @@ void SponzaApp::BuildDescriptorHeap()
 
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
     heapDesc.NumDescriptors = totalSlots;
-    heapDesc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heapDesc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(
         &heapDesc, IID_PPV_ARGS(&mSrvHeap)));
 }
 
+// =============================================================
 void SponzaApp::BuildConstantBuffer()
 {
     UINT cbSize = (sizeof(CBPerObject) + 255) & ~255;
@@ -249,13 +255,14 @@ void SponzaApp::BuildConstantBuffer()
 
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
     cbvDesc.BufferLocation = mConstantBuffer->GetGPUVirtualAddress();
-    cbvDesc.SizeInBytes    = cbSize;
+    cbvDesc.SizeInBytes = cbSize;
 
     md3dDevice->CreateConstantBufferView(
         &cbvDesc,
         mSrvHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
+// =============================================================
 void SponzaApp::BuildRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE cbvRange;
@@ -271,14 +278,14 @@ void SponzaApp::BuildRootSignature()
         1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
     D3D12_STATIC_SAMPLER_DESC sampler = {};
-    sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.MaxAnisotropy    = 1;
-    sampler.ComparisonFunc   = D3D12_COMPARISON_FUNC_ALWAYS;
-    sampler.MaxLOD           = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister   = 0;
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
@@ -297,6 +304,7 @@ void SponzaApp::BuildRootSignature()
         IID_PPV_ARGS(&mRootSignature)));
 }
 
+// =============================================================
 void SponzaApp::BuildShadersAndInputLayout()
 {
     UINT compileFlags = 0;
@@ -330,33 +338,46 @@ void SponzaApp::BuildShadersAndInputLayout()
     };
 }
 
+// =============================================================
 void SponzaApp::BuildPSO()
 {
+    // --- Базовый PSO descriptor ---
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-    psoDesc.InputLayout           = { mInputLayout.data(), (UINT)mInputLayout.size() };
-    psoDesc.pRootSignature        = mRootSignature.Get();
-    psoDesc.VS                    = { mVsByteCode->GetBufferPointer(),
+    psoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+    psoDesc.pRootSignature = mRootSignature.Get();
+    psoDesc.VS = { mVsByteCode->GetBufferPointer(),
                                       mVsByteCode->GetBufferSize() };
-    psoDesc.PS                    = { mPsByteCode->GetBufferPointer(),
+    psoDesc.PS = { mPsByteCode->GetBufferPointer(),
                                       mPsByteCode->GetBufferSize() };
-    psoDesc.RasterizerState       = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    psoDesc.BlendState            = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-    psoDesc.DepthStencilState     = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-    psoDesc.SampleMask            = UINT_MAX;
+    psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    psoDesc.NumRenderTargets      = 1;
-    psoDesc.RTVFormats[0]         = mBackBufferFormat;
-    psoDesc.DSVFormat             = mDepthStencilFormat;
-    psoDesc.SampleDesc            = { 1, 0 };
+    psoDesc.NumRenderTargets = 1;
+    psoDesc.RTVFormats[0] = mBackBufferFormat;
+    psoDesc.DSVFormat = mDepthStencilFormat;
+    psoDesc.SampleDesc = { 1, 0 };
 
+    // --- Обычный solid PSO ---
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(
         &psoDesc, IID_PPV_ARGS(&mPSO)));
+
+    // --- Wireframe PSO ---
+    // Копируем весь descriptor и меняем только FillMode и CullMode
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoWireDesc = psoDesc;
+    psoWireDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    psoWireDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(
+        &psoWireDesc, IID_PPV_ARGS(&mPSOWireframe)));
 }
 
+// =============================================================
 void SponzaApp::UploadBufferData(ComPtr<ID3D12Resource>& dest,
-                                  ComPtr<ID3D12Resource>& upload,
-                                  const void* data, UINT byteSize,
-                                  D3D12_RESOURCE_STATES finalState)
+    ComPtr<ID3D12Resource>& upload,
+    const void* data, UINT byteSize,
+    D3D12_RESOURCE_STATES finalState)
 {
     CD3DX12_HEAP_PROPERTIES defHeap(D3D12_HEAP_TYPE_DEFAULT);
     CD3DX12_HEAP_PROPERTIES upHeap(D3D12_HEAP_TYPE_UPLOAD);
@@ -384,18 +405,19 @@ void SponzaApp::UploadBufferData(ComPtr<ID3D12Resource>& dest,
     mCommandList->ResourceBarrier(1, &barrier);
 }
 
+// =============================================================
 void SponzaApp::CreateWhiteTexture()
 {
     UINT32 white = 0xFFFFFFFF;
 
     D3D12_RESOURCE_DESC texDesc = {};
-    texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texDesc.Width            = 1;
-    texDesc.Height           = 1;
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = 1;
+    texDesc.Height = 1;
     texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels        = 1;
-    texDesc.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
-    texDesc.SampleDesc       = { 1, 0 };
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc = { 1, 0 };
 
     CD3DX12_HEAP_PROPERTIES defHeap(D3D12_HEAP_TYPE_DEFAULT);
     ComPtr<ID3D12Resource> tex;
@@ -417,8 +439,8 @@ void SponzaApp::CreateWhiteTexture()
         nullptr, IID_PPV_ARGS(&upload)));
 
     D3D12_SUBRESOURCE_DATA subData = {};
-    subData.pData      = &white;
-    subData.RowPitch   = 4;
+    subData.pData = &white;
+    subData.RowPitch = 4;
     subData.SlicePitch = 4;
     UpdateSubresources(mCommandList.Get(), tex.Get(), upload.Get(), 0, 0, 1, &subData);
 
@@ -429,10 +451,10 @@ void SponzaApp::CreateWhiteTexture()
     mCommandList->ResourceBarrier(1, &barrier);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture2D.MipLevels     = 1;
+    srvDesc.Texture2D.MipLevels = 1;
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE hWhite(
         mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
@@ -443,6 +465,7 @@ void SponzaApp::CreateWhiteTexture()
     mTextureUploads.push_back(upload);
 }
 
+// =============================================================
 bool SponzaApp::LoadTexture(const std::string& path, int heapIndex)
 {
     int w, h, channels;
@@ -451,13 +474,13 @@ bool SponzaApp::LoadTexture(const std::string& path, int heapIndex)
         return false;
 
     D3D12_RESOURCE_DESC texDesc = {};
-    texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texDesc.Width            = (UINT)w;
-    texDesc.Height           = (UINT)h;
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = (UINT)w;
+    texDesc.Height = (UINT)h;
     texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels        = 1;
-    texDesc.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
-    texDesc.SampleDesc       = { 1, 0 };
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc = { 1, 0 };
 
     CD3DX12_HEAP_PROPERTIES defHeap(D3D12_HEAP_TYPE_DEFAULT);
     ComPtr<ID3D12Resource> tex;
@@ -479,8 +502,8 @@ bool SponzaApp::LoadTexture(const std::string& path, int heapIndex)
         nullptr, IID_PPV_ARGS(&upload)));
 
     D3D12_SUBRESOURCE_DATA subData = {};
-    subData.pData      = pixels;
-    subData.RowPitch   = (LONG_PTR)w * 4;
+    subData.pData = pixels;
+    subData.RowPitch = (LONG_PTR)w * 4;
     subData.SlicePitch = subData.RowPitch * h;
     UpdateSubresources(mCommandList.Get(), tex.Get(), upload.Get(), 0, 0, 1, &subData);
 
@@ -493,10 +516,10 @@ bool SponzaApp::LoadTexture(const std::string& path, int heapIndex)
     mCommandList->ResourceBarrier(1, &barrier);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture2D.MipLevels     = 1;
+    srvDesc.Texture2D.MipLevels = 1;
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE hTex(
         mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
@@ -508,6 +531,7 @@ bool SponzaApp::LoadTexture(const std::string& path, int heapIndex)
     return true;
 }
 
+// =============================================================
 void SponzaApp::LoadModel(const std::string& objPath)
 {
     tinyobj::attrib_t                attrib;
@@ -531,7 +555,7 @@ void SponzaApp::LoadModel(const std::string& objPath)
     for (auto& shape : shapes)
     {
         SubMesh sm;
-        sm.IndexStart   = (UINT)allIndices.size();
+        sm.IndexStart = (UINT)allIndices.size();
         sm.DiffuseColor = { 1.f, 1.f, 1.f };
         sm.TextureIndex = 1;
 
@@ -614,7 +638,7 @@ void SponzaApp::LoadModel(const std::string& objPath)
         mSubMeshes.push_back(sm);
     }
 
-    UINT vbSize = (UINT)(allVerts.size()   * sizeof(Vertex));
+    UINT vbSize = (UINT)(allVerts.size() * sizeof(Vertex));
     UINT ibSize = (UINT)(allIndices.size() * sizeof(uint32_t));
 
     UploadBufferData(mVertexBuffer, mVertexUpload,
@@ -626,12 +650,12 @@ void SponzaApp::LoadModel(const std::string& objPath)
         D3D12_RESOURCE_STATE_INDEX_BUFFER);
 
     mVbView.BufferLocation = mVertexBuffer->GetGPUVirtualAddress();
-    mVbView.SizeInBytes    = vbSize;
-    mVbView.StrideInBytes  = sizeof(Vertex);
+    mVbView.SizeInBytes = vbSize;
+    mVbView.StrideInBytes = sizeof(Vertex);
 
     mIbView.BufferLocation = mIndexBuffer->GetGPUVirtualAddress();
-    mIbView.SizeInBytes    = ibSize;
-    mIbView.Format         = DXGI_FORMAT_R32_UINT;
+    mIbView.SizeInBytes = ibSize;
+    mIbView.Format = DXGI_FORMAT_R32_UINT;
 }
 
 void SponzaApp::BuildGeometry()

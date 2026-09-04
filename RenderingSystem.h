@@ -51,6 +51,8 @@ public:
     void BeginGeometryPass(ID3D12GraphicsCommandList* cmdList, GBuffer* gbuffer,
         D3D12_CPU_DESCRIPTOR_HANDLE dsv, bool wireframe);
 
+    void BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
+
     void BeginLightingPass(ID3D12GraphicsCommandList* cmdList,
         ID3D12DescriptorHeap* srvHeap, UINT gbufferSrvIndex,
         UINT lightCbvIndex, UINT descriptorSize);
@@ -75,11 +77,16 @@ private:
 
     ComPtr<ID3DBlob> mGeometryVS;
     ComPtr<ID3DBlob> mGeometryPS;
+    ComPtr<ID3DBlob> mTessellationVS;
+    ComPtr<ID3DBlob> mTessellationHS;
+    ComPtr<ID3DBlob> mTessellationDS;
     ComPtr<ID3DBlob> mLightingVS;
     ComPtr<ID3DBlob> mLightingPS;
 
     ComPtr<ID3D12PipelineState> mGeometryPSO;
     ComPtr<ID3D12PipelineState> mGeometryWirePSO;
+    ComPtr<ID3D12PipelineState> mTessellationPSO;
+    ComPtr<ID3D12PipelineState> mTessellationWirePSO;
     ComPtr<ID3D12PipelineState> mLightingPSO;
 
     ComPtr<ID3D12Resource> mLightCB;

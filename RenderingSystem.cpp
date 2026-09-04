@@ -75,6 +75,12 @@ void RenderingSystem::BeginGeometryPass(ID3D12GraphicsCommandList* cmdList, GBuf
     cmdList->OMSetRenderTargets(GBuffer::BufferCount, rtvs, false, &dsv);
 }
 
+void RenderingSystem::BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, bool wireframe)
+{
+    cmdList->SetPipelineState(wireframe ? mTessellationWirePSO.Get() : mTessellationPSO.Get());
+    cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
+}
+
 void RenderingSystem::BeginLightingPass(ID3D12GraphicsCommandList* cmdList,
     ID3D12DescriptorHeap* srvHeap, UINT gbufferSrvIndex,
     UINT lightCbvIndex, UINT descriptorSize)
@@ -95,12 +101,18 @@ void RenderingSystem::BuildGeometryRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE cbvRange;
     cbvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
-    CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE albedoRange;
+    albedoRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE normalRange;
+    normalRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+    CD3DX12_DESCRIPTOR_RANGE displacementRange;
+    displacementRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
 
-    CD3DX12_ROOT_PARAMETER params[2];
+    CD3DX12_ROOT_PARAMETER params[4];
     params[0].InitAsDescriptorTable(1, &cbvRange, D3D12_SHADER_VISIBILITY_ALL);
-    params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[1].InitAsDescriptorTable(1, &albedoRange, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[2].InitAsDescriptorTable(1, &normalRange, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[3].InitAsDescriptorTable(1, &displacementRange, D3D12_SHADER_VISIBILITY_ALL);
 
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -108,9 +120,9 @@ void RenderingSystem::BuildGeometryRootSignature(ID3D12Device* device)
     sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     sampler.MaxLOD = D3D12_FLOAT32_MAX;
     sampler.ShaderRegister = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    CD3DX12_ROOT_SIGNATURE_DESC desc(2, params, 1, &sampler,
+    CD3DX12_ROOT_SIGNATURE_DESC desc(4, params, 1, &sampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     ComPtr<ID3DBlob> serialized, errors;
     ThrowIfFailedRS(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -151,6 +163,9 @@ void RenderingSystem::BuildShaders()
 {
     mGeometryVS = CompileShader(L"shader.hlsl", "GeometryVS", "vs_5_0");
     mGeometryPS = CompileShader(L"shader.hlsl", "GeometryPS", "ps_5_0");
+    mTessellationVS = CompileShader(L"shader.hlsl", "TessellationVS", "vs_5_0");
+    mTessellationHS = CompileShader(L"shader.hlsl", "TessellationHS", "hs_5_0");
+    mTessellationDS = CompileShader(L"shader.hlsl", "TessellationDS", "ds_5_0");
     mLightingVS = CompileShader(L"shader.hlsl", "LightingVS", "vs_5_0");
     mLightingPS = CompileShader(L"shader.hlsl", "LightingPS", "ps_5_0");
 }
@@ -182,6 +197,19 @@ void RenderingSystem::BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferForm
     D3D12_GRAPHICS_PIPELINE_STATE_DESC wire = geo;
     wire.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailedRS(device->CreateGraphicsPipelineState(&wire, IID_PPV_ARGS(&mGeometryWirePSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC tessellation = geo;
+    tessellation.VS = { mTessellationVS->GetBufferPointer(), mTessellationVS->GetBufferSize() };
+    tessellation.HS = { mTessellationHS->GetBufferPointer(), mTessellationHS->GetBufferSize() };
+    tessellation.DS = { mTessellationDS->GetBufferPointer(), mTessellationDS->GetBufferSize() };
+    tessellation.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(
+        &tessellation, IID_PPV_ARGS(&mTessellationPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC tessellationWire = tessellation;
+    tessellationWire.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(
+        &tessellationWire, IID_PPV_ARGS(&mTessellationWirePSO)));
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC light = {};
     light.InputLayout = { nullptr, 0 };

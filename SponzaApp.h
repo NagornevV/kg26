@@ -52,6 +52,10 @@ struct CBPerObject
     XMFLOAT3   ObjectColor; float Pad0;
     XMFLOAT2   UVScale;
     XMFLOAT2   UVOffset;
+    XMFLOAT3   EyePos; float TessellationScale;
+    float      UseNormalMap;
+    float      DisplacementScale;
+    XMFLOAT2   Pad1;
 };
 
 class SponzaApp : public D3DApp
@@ -78,14 +82,17 @@ protected:
 private:
     void BuildDescriptorHeap();
     void BuildConstantBuffer();
+    void BuildTessellationConstantBuffer();
     void BuildShadersAndInputLayout();
     void BuildGeometry();
+    void BuildTessellatedSurface();
     void BuildRenderingSystem();
     void BuildLights();
 
     void LoadModel(const std::string& objPath);
     bool LoadTexture(const std::string& path, int heapIndex);
     void CreateWhiteTexture();
+    void LoadTessellationTextures();
     void ShootLight();
     void UpdateShotLights(float deltaTime);
     void UpdateCameraMovement(float deltaTime);
@@ -103,7 +110,11 @@ private:
     static const int kMaxShotLights = 16 - kStaticPointLights;
     static const int kGBufferSrvStart = 2 + kMaxTextures;
     static const int kLightCbvIndex = kGBufferSrvStart + GBuffer::BufferCount;
-    static const int kTotalSrvSlots = kLightCbvIndex + 1;
+    static const int kTessellationAlbedoIndex = kLightCbvIndex + 1;
+    static const int kTessellationNormalIndex = kTessellationAlbedoIndex + 1;
+    static const int kTessellationDisplacementIndex = kTessellationNormalIndex + 1;
+    static const int kTessellationCbvIndex = kTessellationDisplacementIndex + 1;
+    static const int kTotalSrvSlots = kTessellationCbvIndex + 1;
 
     ComPtr<ID3D12DescriptorHeap> mSrvHeap;
 
@@ -121,8 +132,14 @@ private:
     std::vector<SubMesh>     mSubMeshes;
     std::vector<CollisionTriangle> mCollisionTriangles;
 
+    ComPtr<ID3D12Resource>   mTessellationVertexBuffer;
+    ComPtr<ID3D12Resource>   mTessellationVertexUpload;
+    D3D12_VERTEX_BUFFER_VIEW mTessellationVbView = {};
+
     ComPtr<ID3D12Resource> mConstantBuffer;
     BYTE* mCbMappedData = nullptr;
+    ComPtr<ID3D12Resource> mTessellationConstantBuffer;
+    BYTE* mTessellationCbMappedData = nullptr;
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
     GBuffer mGBuffer;

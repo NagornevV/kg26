@@ -68,6 +68,12 @@ SponzaApp::~SponzaApp()
         mConstantBuffer->Unmap(0, nullptr);
         mCbMappedData = nullptr;
     }
+
+    if (mTessellationCbMappedData)
+    {
+        mTessellationConstantBuffer->Unmap(0, nullptr);
+        mTessellationCbMappedData = nullptr;
+    }
 }
 
 // =============================================================
@@ -81,6 +87,7 @@ bool SponzaApp::Initialize()
 
     BuildDescriptorHeap();
     BuildConstantBuffer();
+    BuildTessellationConstantBuffer();
     BuildShadersAndInputLayout();
 
     // GBuffer создаётся до PSO, потому что форматы MRT нужны при создании pipeline state.
@@ -89,7 +96,9 @@ bool SponzaApp::Initialize()
 
     BuildRenderingSystem();
     CreateWhiteTexture();
+    LoadTessellationTextures();
     LoadModel("sponza/sponza.obj");
+    BuildTessellatedSurface();
     BuildLights();
 
     ThrowIfFailed(mCommandList->Close());
@@ -99,6 +108,7 @@ bool SponzaApp::Initialize()
 
     mVertexUpload.Reset();
     mIndexUpload.Reset();
+    mTessellationVertexUpload.Reset();
     mTextureUploads.clear();
 
     return true;
@@ -237,7 +247,18 @@ void SponzaApp::Update(const GameTimer& gt)
     cb.ObjectColor = { 1.f, 1.f, 1.f };
     cb.UVScale = mUVScale;
     cb.UVOffset = mUVOffset;
+    cb.EyePos = mEyePos;
+    cb.TessellationScale = 32.f;
+    cb.UseNormalMap = 0.f;
+    cb.DisplacementScale = 0.f;
     memcpy(mCbMappedData, &cb, sizeof(CBPerObject));
+
+    CBPerObject tessellationCb = cb;
+    tessellationCb.UVScale = { 5.f, 5.f };
+    tessellationCb.UVOffset = { 0.f, 0.f };
+    tessellationCb.UseNormalMap = 1.f;
+    tessellationCb.DisplacementScale = 35.f;
+    memcpy(mTessellationCbMappedData, &tessellationCb, sizeof(CBPerObject));
 
     mLights.EyePos = mEyePos;
     mRenderingSystem.UpdateLights(md3dDevice.Get(), mSrvHeap.Get(),
@@ -274,9 +295,39 @@ void SponzaApp::Draw(const GameTimer& gt)
             mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
             sm.TextureIndex, mCbvSrvUavDescriptorSize);
         mCommandList->SetGraphicsRootDescriptorTable(1, srvHandle);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE whiteHandle(
+            mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+            1, mCbvSrvUavDescriptorSize);
+        mCommandList->SetGraphicsRootDescriptorTable(2, whiteHandle);
+        mCommandList->SetGraphicsRootDescriptorTable(3, whiteHandle);
 
         mCommandList->DrawIndexedInstanced(sm.IndexCount, 1, sm.IndexStart, 0, 0);
     }
+
+    // ---------- Tessellation pass: displacement + normal map ----------
+    mRenderingSystem.BeginTessellationPass(mCommandList.Get(), mWireframe);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE tessellationCbv(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        kTessellationCbvIndex, mCbvSrvUavDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE tessellationAlbedo(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        kTessellationAlbedoIndex, mCbvSrvUavDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE tessellationNormal(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        kTessellationNormalIndex, mCbvSrvUavDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE tessellationDisplacement(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        kTessellationDisplacementIndex, mCbvSrvUavDescriptorSize);
+
+    mCommandList->SetGraphicsRootDescriptorTable(0, tessellationCbv);
+    mCommandList->SetGraphicsRootDescriptorTable(1, tessellationAlbedo);
+    mCommandList->SetGraphicsRootDescriptorTable(2, tessellationNormal);
+    mCommandList->SetGraphicsRootDescriptorTable(3, tessellationDisplacement);
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
+    mCommandList->IASetVertexBuffers(0, 1, &mTessellationVbView);
+    mCommandList->IASetIndexBuffer(nullptr);
+    mCommandList->DrawInstanced(4, 1, 0, 0);
 
     // ---------- 2. Lighting pass: читаем GBuffer и выводим свет на экран ----------
     mGBuffer.TransitionToShaderResources(mCommandList.Get());
@@ -345,6 +396,28 @@ void SponzaApp::BuildConstantBuffer()
     md3dDevice->CreateConstantBufferView(
         &cbvDesc,
         mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
+void SponzaApp::BuildTessellationConstantBuffer()
+{
+    UINT cbSize = (sizeof(CBPerObject) + 255) & ~255;
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    auto cbDesc = CD3DX12_RESOURCE_DESC::Buffer(cbSize);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(
+        &uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr, IID_PPV_ARGS(&mTessellationConstantBuffer)));
+
+    ThrowIfFailed(mTessellationConstantBuffer->Map(0, nullptr,
+        reinterpret_cast<void**>(&mTessellationCbMappedData)));
+
+    D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+    cbvDesc.BufferLocation = mTessellationConstantBuffer->GetGPUVirtualAddress();
+    cbvDesc.SizeInBytes = cbSize;
+    CD3DX12_CPU_DESCRIPTOR_HANDLE h(
+        mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        kTessellationCbvIndex, mCbvSrvUavDescriptorSize);
+    md3dDevice->CreateConstantBufferView(&cbvDesc, h);
 }
 
 // =============================================================
@@ -457,6 +530,16 @@ void SponzaApp::CreateWhiteTexture()
 
     mTextures.push_back(tex);
     mTextureUploads.push_back(upload);
+}
+
+void SponzaApp::LoadTessellationTextures()
+{
+    if (!LoadTexture("tessellation/bricks2.jpg", kTessellationAlbedoIndex)
+        || !LoadTexture("tessellation/bricks2_normal.jpg", kTessellationNormalIndex)
+        || !LoadTexture("tessellation/bricks2_disp.jpg", kTessellationDisplacementIndex))
+    {
+        throw std::runtime_error("Failed to load tessellation textures");
+    }
 }
 
 // =============================================================
@@ -648,6 +731,28 @@ bool SponzaApp::FindRayHit(const XMFLOAT3& origin, const XMFLOAT3& direction,
         origin.z + direction.z * closestDistance
     };
     return true;
+}
+
+void SponzaApp::BuildTessellatedSurface()
+{
+    // Площадка пола внутри Sponza. X и Z задают её границы,
+    // Y — высоту пола в координатах модели.
+    const float extent = 700.f;
+    const float height = 10.f;
+    const Vertex vertices[4] =
+    {
+        { {-extent, height, -extent}, {0.f, 1.f, 0.f}, {0.f, 0.f} },
+        { { extent, height, -extent}, {0.f, 1.f, 0.f}, {1.f, 0.f} },
+        { {-extent, height,  extent}, {0.f, 1.f, 0.f}, {0.f, 1.f} },
+        { { extent, height,  extent}, {0.f, 1.f, 0.f}, {1.f, 1.f} }
+    };
+
+    UploadBufferData(mTessellationVertexBuffer, mTessellationVertexUpload,
+        vertices, sizeof(vertices), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+
+    mTessellationVbView.BufferLocation = mTessellationVertexBuffer->GetGPUVirtualAddress();
+    mTessellationVbView.SizeInBytes = sizeof(vertices);
+    mTessellationVbView.StrideInBytes = sizeof(Vertex);
 }
 
 // =============================================================

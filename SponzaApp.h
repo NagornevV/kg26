@@ -27,6 +27,24 @@ struct SubMesh
     int      TextureIndex;
 };
 
+struct CollisionTriangle
+{
+    XMFLOAT3 A;
+    XMFLOAT3 B;
+    XMFLOAT3 C;
+};
+
+struct ShotLight
+{
+    XMFLOAT3 Position;
+    XMFLOAT3 Target;
+    XMFLOAT3 Color;
+    float Radius = 260.f;
+    float Intensity = 12.f;
+    float Speed = 1400.f;
+    bool Stuck = false;
+};
+
 struct CBPerObject
 {
     XMFLOAT4X4 World;
@@ -68,6 +86,11 @@ private:
     void LoadModel(const std::string& objPath);
     bool LoadTexture(const std::string& path, int heapIndex);
     void CreateWhiteTexture();
+    void ShootLight();
+    void UpdateShotLights(float deltaTime);
+    void UpdateCameraMovement(float deltaTime);
+    bool FindRayHit(const XMFLOAT3& origin, const XMFLOAT3& direction,
+        XMFLOAT3& hitPoint) const;
 
     void UploadBufferData(ComPtr<ID3D12Resource>& dest,
         ComPtr<ID3D12Resource>& upload,
@@ -76,6 +99,8 @@ private:
 
 private:
     static const int kMaxTextures = 128;
+    static const int kStaticPointLights = 6;
+    static const int kMaxShotLights = 16 - kStaticPointLights;
     static const int kGBufferSrvStart = 2 + kMaxTextures;
     static const int kLightCbvIndex = kGBufferSrvStart + GBuffer::BufferCount;
     static const int kTotalSrvSlots = kLightCbvIndex + 1;
@@ -94,6 +119,7 @@ private:
     D3D12_VERTEX_BUFFER_VIEW mVbView = {};
     D3D12_INDEX_BUFFER_VIEW  mIbView = {};
     std::vector<SubMesh>     mSubMeshes;
+    std::vector<CollisionTriangle> mCollisionTriangles;
 
     ComPtr<ID3D12Resource> mConstantBuffer;
     BYTE* mCbMappedData = nullptr;
@@ -102,6 +128,8 @@ private:
     GBuffer mGBuffer;
     RenderingSystem mRenderingSystem;
     CBFrameLights mLights = {};
+    std::vector<ShotLight> mShotLights;
+    int mNextShotColor = 0;
 
     // Флаг wireframe режима — переключается кнопкой F
     bool mWireframe = false;
@@ -111,8 +139,10 @@ private:
     float    mPitch = -0.1f;
     float    mRadius = 1000.f;
     XMFLOAT3 mEyePos = { 0.f, 200.f, -1000.f };
+    XMFLOAT3 mCameraTarget = { 0.f, 100.f, 0.f };
+    float    mCameraSpeed = 650.f;
 
-    // Мышь
+    // Мышь: ЛКМ стреляет, ПКМ вращает камеру.
     bool  mMouseDown = false;
     POINT mLastMouse = {};
     float mMouseSens = 0.005f;

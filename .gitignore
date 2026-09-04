@@ -1,0 +1,8 @@
+# Visual Studio user and build output
+.vs/
+x64/
+Debug/
+Release/
+*.vcxproj.user
+
+# Keep source assets outside Git. Do not ignore *.obj globally: Sponza uses it.

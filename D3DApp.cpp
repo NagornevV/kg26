@@ -144,10 +144,12 @@ LRESULT D3DApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // --- Мышь ---
     case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
         OnMouseDown(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return 0;
 
     case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
         OnMouseUp(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return 0;
 

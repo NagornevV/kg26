@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
@@ -17,11 +18,44 @@ static void ThrowIfFailed(HRESULT hr)
         throw std::runtime_error("HRESULT failed");
 }
 
+static bool RayTriangleIntersection(const XMFLOAT3& origin,
+    const XMFLOAT3& direction, const CollisionTriangle& triangle,
+    float& distance)
+{
+    const XMVECTOR rayOrigin = XMLoadFloat3(&origin);
+    const XMVECTOR rayDirection = XMLoadFloat3(&direction);
+    const XMVECTOR a = XMLoadFloat3(&triangle.A);
+    const XMVECTOR b = XMLoadFloat3(&triangle.B);
+    const XMVECTOR c = XMLoadFloat3(&triangle.C);
+
+    const XMVECTOR edge1 = XMVectorSubtract(b, a);
+    const XMVECTOR edge2 = XMVectorSubtract(c, a);
+    const XMVECTOR p = XMVector3Cross(rayDirection, edge2);
+    const float determinant = XMVectorGetX(XMVector3Dot(edge1, p));
+
+    if (std::abs(determinant) < 0.000001f)
+        return false;
+
+    const float inverseDeterminant = 1.0f / determinant;
+    const XMVECTOR t = XMVectorSubtract(rayOrigin, a);
+    const float u = XMVectorGetX(XMVector3Dot(t, p)) * inverseDeterminant;
+    if (u < 0.0f || u > 1.0f)
+        return false;
+
+    const XMVECTOR q = XMVector3Cross(t, edge1);
+    const float v = XMVectorGetX(XMVector3Dot(rayDirection, q)) * inverseDeterminant;
+    if (v < 0.0f || u + v > 1.0f)
+        return false;
+
+    distance = XMVectorGetX(XMVector3Dot(edge2, q)) * inverseDeterminant;
+    return distance > 0.01f;
+}
+
 // =============================================================
 SponzaApp::SponzaApp(HINSTANCE hInstance)
     : D3DApp(hInstance)
 {
-    mMainWndCaption = L"Sponza — DX12 Deferred Rendering | F: wireframe";
+    mMainWndCaption = L"Sponza — WASD: move | LMB: shoot | RMB: orbit | F: wireframe";
 }
 
 SponzaApp::~SponzaApp()
@@ -93,16 +127,25 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
 
 void SponzaApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
-    mMouseDown = true;
-    mLastMouse.x = x;
-    mLastMouse.y = y;
-    SetCapture(mhMainWnd);
+    if (btnState & MK_LBUTTON)
+        ShootLight();
+
+    if (btnState & MK_RBUTTON)
+    {
+        mMouseDown = true;
+        mLastMouse.x = x;
+        mLastMouse.y = y;
+        SetCapture(mhMainWnd);
+    }
 }
 
 void SponzaApp::OnMouseUp(WPARAM btnState, int x, int y)
 {
-    mMouseDown = false;
-    ReleaseCapture();
+    if (mMouseDown)
+    {
+        mMouseDown = false;
+        ReleaseCapture();
+    }
 }
 
 void SponzaApp::OnMouseMove(WPARAM btnState, int x, int y)
@@ -147,8 +190,8 @@ void SponzaApp::BuildLights()
         {  690.f, 260.f,  -80.f }, { -720.f, 190.f,  140.f }
     };
 
-    mLights.PointCount = 6.0f;
-    for (int i = 0; i < 6; ++i)
+    mLights.PointCount = (float)kStaticPointLights;
+    for (int i = 0; i < kStaticPointLights; ++i)
     {
         mLights.Points[i].Position = positions[i];
         mLights.Points[i].Radius = 650.f;
@@ -168,21 +211,25 @@ void SponzaApp::BuildLights()
 // =============================================================
 void SponzaApp::Update(const GameTimer& gt)
 {
+    UpdateCameraMovement(gt.DeltaTime());
+
     mEyePos = {
-        mRadius * cosf(mPitch) * sinf(mYaw),
-        mRadius * sinf(mPitch) + 100.f,
-        mRadius * cosf(mPitch) * cosf(mYaw)
+        mCameraTarget.x + mRadius * cosf(mPitch) * sinf(mYaw),
+        mCameraTarget.y + mRadius * sinf(mPitch),
+        mCameraTarget.z + mRadius * cosf(mPitch) * cosf(mYaw)
     };
 
     XMMATRIX world = XMMatrixIdentity();
     XMMATRIX view = XMMatrixLookAtLH(
         XMLoadFloat3(&mEyePos),
-        XMVectorSet(0.f, 100.f, 0.f, 0.f),
+        XMLoadFloat3(&mCameraTarget),
         XMVectorSet(0.f, 1.f, 0.f, 0.f));
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
 
     mUVOffset.x = fmodf(gt.TotalTime() * mUVScrollSpeed, 1.f);
     mUVOffset.y = fmodf(gt.TotalTime() * mUVScrollSpeed * 0.5f, 1.f);
+
+    UpdateShotLights(gt.DeltaTime());
 
     CBPerObject cb = {};
     XMStoreFloat4x4(&cb.World, XMMatrixTranspose(world));
@@ -478,6 +525,131 @@ bool SponzaApp::LoadTexture(const std::string& path, int heapIndex)
     return true;
 }
 
+void SponzaApp::ShootLight()
+{
+    const XMVECTOR direction = XMVector3Normalize(
+        XMVectorSubtract(XMLoadFloat3(&mCameraTarget), XMLoadFloat3(&mEyePos)));
+
+    XMFLOAT3 rayDirection;
+    XMStoreFloat3(&rayDirection, direction);
+
+    XMFLOAT3 hitPoint;
+    if (!FindRayHit(mEyePos, rayDirection, hitPoint))
+        return;
+
+    if ((int)mShotLights.size() == kMaxShotLights)
+        mShotLights.erase(mShotLights.begin());
+
+    static const XMFLOAT3 colors[] =
+    {
+        { 1.0f, 0.20f, 0.10f }, { 0.15f, 0.45f, 1.0f },
+        { 1.0f, 0.80f, 0.12f }, { 0.90f, 0.15f, 0.85f }
+    };
+
+    ShotLight shot;
+    shot.Position = mEyePos;
+    shot.Target = {
+        hitPoint.x - rayDirection.x * 2.f,
+        hitPoint.y - rayDirection.y * 2.f,
+        hitPoint.z - rayDirection.z * 2.f
+    };
+    shot.Color = colors[mNextShotColor++ % _countof(colors)];
+    mShotLights.push_back(shot);
+}
+
+void SponzaApp::UpdateShotLights(float deltaTime)
+{
+    for (ShotLight& shot : mShotLights)
+    {
+        if (shot.Stuck)
+            continue;
+
+        XMVECTOR toTarget = XMVectorSubtract(
+            XMLoadFloat3(&shot.Target), XMLoadFloat3(&shot.Position));
+        const float distance = XMVectorGetX(XMVector3Length(toTarget));
+        const float step = shot.Speed * deltaTime;
+
+        if (distance <= step)
+        {
+            shot.Position = shot.Target;
+            shot.Stuck = true;
+        }
+        else
+        {
+            toTarget = XMVectorScale(XMVector3Normalize(toTarget), step);
+            XMStoreFloat3(&shot.Position,
+                XMVectorAdd(XMLoadFloat3(&shot.Position), toTarget));
+        }
+    }
+
+    mLights.PointCount = (float)(kStaticPointLights + mShotLights.size());
+    for (size_t i = 0; i < mShotLights.size(); ++i)
+    {
+        const ShotLight& shot = mShotLights[i];
+        PointLight& light = mLights.Points[kStaticPointLights + i];
+        light.Position = shot.Position;
+        light.Radius = shot.Radius;
+        light.Color = shot.Color;
+        light.Intensity = shot.Intensity;
+    }
+}
+
+void SponzaApp::UpdateCameraMovement(float deltaTime)
+{
+    const bool forwardPressed = (GetAsyncKeyState('W') & 0x8000) != 0;
+    const bool backwardPressed = (GetAsyncKeyState('S') & 0x8000) != 0;
+    const bool leftPressed = (GetAsyncKeyState('A') & 0x8000) != 0;
+    const bool rightPressed = (GetAsyncKeyState('D') & 0x8000) != 0;
+
+    if (!forwardPressed && !backwardPressed && !leftPressed && !rightPressed)
+        return;
+
+    XMVECTOR forward = XMVectorSubtract(
+        XMLoadFloat3(&mCameraTarget), XMLoadFloat3(&mEyePos));
+    forward = XMVector3Normalize(forward);
+
+    const XMVECTOR up = XMVectorSet(0.f, 1.f, 0.f, 0.f);
+    const XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, forward));
+    XMVECTOR movement = XMVectorZero();
+
+    if (forwardPressed) movement = XMVectorAdd(movement, forward);
+    if (backwardPressed) movement = XMVectorSubtract(movement, forward);
+    if (rightPressed) movement = XMVectorAdd(movement, right);
+    if (leftPressed) movement = XMVectorSubtract(movement, right);
+
+    movement = XMVectorScale(XMVector3Normalize(movement), mCameraSpeed * deltaTime);
+    XMStoreFloat3(&mCameraTarget,
+        XMVectorAdd(XMLoadFloat3(&mCameraTarget), movement));
+}
+
+bool SponzaApp::FindRayHit(const XMFLOAT3& origin, const XMFLOAT3& direction,
+    XMFLOAT3& hitPoint) const
+{
+    float closestDistance = (std::numeric_limits<float>::max)();
+    bool found = false;
+
+    for (const CollisionTriangle& triangle : mCollisionTriangles)
+    {
+        float distance = 0.f;
+        if (RayTriangleIntersection(origin, direction, triangle, distance)
+            && distance < closestDistance)
+        {
+            closestDistance = distance;
+            found = true;
+        }
+    }
+
+    if (!found)
+        return false;
+
+    hitPoint = {
+        origin.x + direction.x * closestDistance,
+        origin.y + direction.y * closestDistance,
+        origin.z + direction.z * closestDistance
+    };
+    return true;
+}
+
 // =============================================================
 void SponzaApp::LoadModel(const std::string& objPath)
 {
@@ -587,6 +759,17 @@ void SponzaApp::LoadModel(const std::string& objPath)
 
     UINT vbSize = (UINT)(allVerts.size() * sizeof(Vertex));
     UINT ibSize = (UINT)(allIndices.size() * sizeof(uint32_t));
+
+    mCollisionTriangles.clear();
+    mCollisionTriangles.reserve(allIndices.size() / 3);
+    for (size_t i = 0; i + 2 < allIndices.size(); i += 3)
+    {
+        mCollisionTriangles.push_back({
+            allVerts[allIndices[i + 0]].Pos,
+            allVerts[allIndices[i + 1]].Pos,
+            allVerts[allIndices[i + 2]].Pos
+        });
+    }
 
     UploadBufferData(mVertexBuffer, mVertexUpload,
         allVerts.data(), vbSize,

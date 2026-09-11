@@ -4,5 +4,9 @@ x64/
 Debug/
 Release/
 *.vcxproj.user
+*.slnx
+packages/
+work_*/
+Thumbs.db
 
-# Keep source assets outside Git. Do not ignore *.obj globally: Sponza uses it.
+# Do not ignore *.obj globally: Sponza uses it.

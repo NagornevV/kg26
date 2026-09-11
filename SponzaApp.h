@@ -52,10 +52,11 @@ struct CBPerObject
     XMFLOAT3   ObjectColor; float Pad0;
     XMFLOAT2   UVScale;
     XMFLOAT2   UVOffset;
-    XMFLOAT3   EyePos; float TessellationScale;
+    float      TessellationMaxFactor;
+    XMFLOAT3   TessellationPadding;
     float      UseNormalMap;
     float      DisplacementScale;
-    XMFLOAT2   Pad1;
+    XMFLOAT2   RenderTargetSize;
 };
 
 class SponzaApp : public D3DApp

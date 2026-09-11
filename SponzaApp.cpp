@@ -55,7 +55,7 @@ static bool RayTriangleIntersection(const XMFLOAT3& origin,
 SponzaApp::SponzaApp(HINSTANCE hInstance)
     : D3DApp(hInstance)
 {
-    mMainWndCaption = L"Sponza — WASD: move | LMB: shoot | RMB: orbit | F: wireframe";
+    mMainWndCaption = L"Sponza - WASD: move | LMB: shoot | RMB: orbit | F: wireframe";
 }
 
 SponzaApp::~SponzaApp()
@@ -247,10 +247,10 @@ void SponzaApp::Update(const GameTimer& gt)
     cb.ObjectColor = { 1.f, 1.f, 1.f };
     cb.UVScale = mUVScale;
     cb.UVOffset = mUVOffset;
-    cb.EyePos = mEyePos;
-    cb.TessellationScale = 32.f;
+    cb.TessellationMaxFactor = 32.f;
     cb.UseNormalMap = 0.f;
     cb.DisplacementScale = 0.f;
+    cb.RenderTargetSize = { static_cast<float>(mClientWidth), static_cast<float>(mClientHeight) };
     memcpy(mCbMappedData, &cb, sizeof(CBPerObject));
 
     CBPerObject tessellationCb = cb;

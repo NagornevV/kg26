@@ -5,10 +5,11 @@ cbuffer CBPerObject : register(b0)
     float3   gObjectColor; float gPad0;
     float2   gUVScale;
     float2   gUVOffset;
-    float3   gTessEyePos; float gTessellationScale;
+    float    gTessellationMaxFactor;
+    float3   gTessellationPadding;
     float    gUseNormalMap;
     float    gDisplacementScale;
-    float2   gTessPad;
+    float2   gRenderTargetSize;
 };
 
 struct PointLight
@@ -122,24 +123,36 @@ TessControlPoint TessellationVS(VSIn vin)
     return output;
 }
 
+float2 ClipToScreen(float4 positionH)
+{
+    float safeW = max(abs(positionH.w), 0.0001f);
+    float2 ndc = positionH.xy / safeW;
+    return (ndc * float2(0.5f, -0.5f) + 0.5f) * gRenderTargetSize;
+}
+
+float TessellationForScreenEdge(float2 a, float2 b)
+{
+    // Один сгенерированный сегмент стремится занимать около 24 пикселей.
+    // Поэтому большой на экране край делится чаще, маленький — реже.
+    const float pixelsPerSegment = 24.0f;
+    return clamp(length(b - a) / pixelsPerSegment, 1.0f, gTessellationMaxFactor);
+}
+
 TessFactors TessellationPatchConstants(
     InputPatch<TessControlPoint, 4> patch, uint patchId : SV_PrimitiveID)
 {
     TessFactors factors;
-    float3 centerL = (patch[0].PosL + patch[1].PosL + patch[2].PosL + patch[3].PosL) * 0.25f;
-    float3 centerW = mul(float4(centerL, 1.0f), gWorld).xyz;
-    float distanceToCamera = length(centerW - gTessEyePos);
-    // Рядом с камерой сетка плотная; дальше она становится проще.
-    float tessellation = lerp(gTessellationScale, 2.0f,
-        saturate(distanceToCamera / 2400.0f));
-    tessellation = clamp(tessellation, 2.0f, 32.0f);
+    float2 p0 = ClipToScreen(mul(mul(float4(patch[0].PosL, 1.0f), gWorld), gViewProj));
+    float2 p1 = ClipToScreen(mul(mul(float4(patch[1].PosL, 1.0f), gWorld), gViewProj));
+    float2 p2 = ClipToScreen(mul(mul(float4(patch[2].PosL, 1.0f), gWorld), gViewProj));
+    float2 p3 = ClipToScreen(mul(mul(float4(patch[3].PosL, 1.0f), gWorld), gViewProj));
 
-    factors.Edges[0] = tessellation;
-    factors.Edges[1] = tessellation;
-    factors.Edges[2] = tessellation;
-    factors.Edges[3] = tessellation;
-    factors.Inside[0] = tessellation;
-    factors.Inside[1] = tessellation;
+    factors.Edges[0] = TessellationForScreenEdge(p0, p2);
+    factors.Edges[1] = TessellationForScreenEdge(p0, p1);
+    factors.Edges[2] = TessellationForScreenEdge(p1, p3);
+    factors.Edges[3] = TessellationForScreenEdge(p2, p3);
+    factors.Inside[0] = 0.5f * (factors.Edges[1] + factors.Edges[3]);
+    factors.Inside[1] = 0.5f * (factors.Edges[0] + factors.Edges[2]);
     return factors;
 }
 

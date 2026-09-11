@@ -101,6 +101,25 @@ GBufferOut GeometryPS(GeoVSOut pin)
     return gout;
 }
 
+struct InstancedVSIn
+{
+    float3 PosL          : POSITION;
+    float3 NormalL       : NORMAL;
+    float2 TexC          : TEXCOORD;
+    float4 PositionScale : INSTANCE_DATA;
+};
+
+GeoVSOut InstancedGeometryVS(InstancedVSIn vin)
+{
+    GeoVSOut vout;
+    float3 posW = vin.PosL * vin.PositionScale.w + vin.PositionScale.xyz;
+    vout.PosW = posW;
+    vout.PosH = mul(float4(posW, 1.0f), gViewProj);
+    vout.NormalW = normalize(vin.NormalL);
+    vout.TexC = vin.TexC;
+    return vout;
+}
+
 struct TessControlPoint
 {
     float3 PosL    : POSITION;

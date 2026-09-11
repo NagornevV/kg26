@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <array>
+#include <memory>
 #include "GBuffer.h"
 #include "RenderingSystem.h"
 
@@ -43,6 +44,37 @@ struct ShotLight
     float Intensity = 12.f;
     float Speed = 1400.f;
     bool Stuck = false;
+};
+
+struct BoundingBox
+{
+    XMFLOAT3 Center;
+    XMFLOAT3 Extents;
+};
+
+struct SceneObject
+{
+    XMFLOAT3 Position;
+    float Scale;
+    BoundingBox Bounds;
+};
+
+struct InstanceData
+{
+    XMFLOAT4 PositionScale;
+};
+
+struct FrustumPlane
+{
+    XMFLOAT3 Normal;
+    float Distance;
+};
+
+struct OctreeNode
+{
+    BoundingBox Bounds;
+    std::vector<UINT> ObjectIndices;
+    std::array<std::unique_ptr<OctreeNode>, 8> Children;
 };
 
 struct CBPerObject
@@ -87,6 +119,10 @@ private:
     void BuildShadersAndInputLayout();
     void BuildGeometry();
     void BuildTessellatedSurface();
+    void BuildCubeGeometry();
+    void BuildSceneObjects();
+    void BuildOctree();
+    void BuildInstanceBuffer();
     void BuildRenderingSystem();
     void BuildLights();
 
@@ -97,6 +133,15 @@ private:
     void ShootLight();
     void UpdateShotLights(float deltaTime);
     void UpdateCameraMovement(float deltaTime);
+    void UpdateVisibleInstances(const XMMATRIX& viewProj);
+    void UpdateWindowCaption();
+    bool IntersectsFrustum(const BoundingBox& box,
+        const std::array<FrustumPlane, 6>& planes) const;
+    std::array<FrustumPlane, 6> ExtractFrustumPlanes(const XMMATRIX& viewProj) const;
+    void SubdivideOctree(OctreeNode& node, int depth);
+    void QueryOctree(const OctreeNode& node,
+        const std::array<FrustumPlane, 6>& planes,
+        std::vector<UINT>& visible) const;
     bool FindRayHit(const XMFLOAT3& origin, const XMFLOAT3& direction,
         XMFLOAT3& hitPoint) const;
 
@@ -137,12 +182,28 @@ private:
     ComPtr<ID3D12Resource>   mTessellationVertexUpload;
     D3D12_VERTEX_BUFFER_VIEW mTessellationVbView = {};
 
+    ComPtr<ID3D12Resource>   mCubeVertexBuffer;
+    ComPtr<ID3D12Resource>   mCubeIndexBuffer;
+    ComPtr<ID3D12Resource>   mCubeVertexUpload;
+    ComPtr<ID3D12Resource>   mCubeIndexUpload;
+    D3D12_VERTEX_BUFFER_VIEW mCubeVbView = {};
+    D3D12_INDEX_BUFFER_VIEW  mCubeIbView = {};
+
+    ComPtr<ID3D12Resource>   mInstanceBuffer;
+    BYTE*                     mInstanceMappedData = nullptr;
+    D3D12_VERTEX_BUFFER_VIEW mInstanceVbView = {};
+    std::vector<SceneObject> mSceneObjects;
+    std::vector<InstanceData> mVisibleInstances;
+    std::unique_ptr<OctreeNode> mOctreeRoot;
+    UINT mVisibleObjectCount = 0;
+
     ComPtr<ID3D12Resource> mConstantBuffer;
     BYTE* mCbMappedData = nullptr;
     ComPtr<ID3D12Resource> mTessellationConstantBuffer;
     BYTE* mTessellationCbMappedData = nullptr;
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> mInstancedInputLayout;
     GBuffer mGBuffer;
     RenderingSystem mRenderingSystem;
     CBFrameLights mLights = {};
@@ -151,6 +212,8 @@ private:
 
     // Флаг wireframe режима — переключается кнопкой F
     bool mWireframe = false;
+    bool mFrustumCullingEnabled = true;
+    bool mOctreeCullingEnabled = true;
 
     // Камера
     float    mYaw = 0.f;

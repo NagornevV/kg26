@@ -43,6 +43,7 @@ public:
         DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat,
         const std::vector<D3D12_INPUT_ELEMENT_DESC>& inputLayout,
+        const std::vector<D3D12_INPUT_ELEMENT_DESC>& instancedInputLayout,
         GBuffer* gbuffer);
 
     void UpdateLights(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap,
@@ -52,6 +53,7 @@ public:
         D3D12_CPU_DESCRIPTOR_HANDLE dsv, bool wireframe);
 
     void BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
+    void BeginInstancedGeometryPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
 
     void BeginLightingPass(ID3D12GraphicsCommandList* cmdList,
         ID3D12DescriptorHeap* srvHeap, UINT gbufferSrvIndex,
@@ -69,6 +71,7 @@ private:
     void BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat,
         const std::vector<D3D12_INPUT_ELEMENT_DESC>& inputLayout,
+        const std::vector<D3D12_INPUT_ELEMENT_DESC>& instancedInputLayout,
         GBuffer* gbuffer);
 
 private:
@@ -76,6 +79,7 @@ private:
     ComPtr<ID3D12RootSignature> mLightingRootSignature;
 
     ComPtr<ID3DBlob> mGeometryVS;
+    ComPtr<ID3DBlob> mInstancedGeometryVS;
     ComPtr<ID3DBlob> mGeometryPS;
     ComPtr<ID3DBlob> mTessellationVS;
     ComPtr<ID3DBlob> mTessellationHS;
@@ -85,6 +89,8 @@ private:
 
     ComPtr<ID3D12PipelineState> mGeometryPSO;
     ComPtr<ID3D12PipelineState> mGeometryWirePSO;
+    ComPtr<ID3D12PipelineState> mInstancedGeometryPSO;
+    ComPtr<ID3D12PipelineState> mInstancedGeometryWirePSO;
     ComPtr<ID3D12PipelineState> mTessellationPSO;
     ComPtr<ID3D12PipelineState> mTessellationWirePSO;
     ComPtr<ID3D12PipelineState> mLightingPSO;

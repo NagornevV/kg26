@@ -74,6 +74,12 @@ SponzaApp::~SponzaApp()
         mTessellationConstantBuffer->Unmap(0, nullptr);
         mTessellationCbMappedData = nullptr;
     }
+
+    if (mInstanceMappedData)
+    {
+        mInstanceBuffer->Unmap(0, nullptr);
+        mInstanceMappedData = nullptr;
+    }
 }
 
 // =============================================================
@@ -99,6 +105,10 @@ bool SponzaApp::Initialize()
     LoadTessellationTextures();
     LoadModel("sponza/sponza.obj");
     BuildTessellatedSurface();
+    BuildCubeGeometry();
+    BuildSceneObjects();
+    BuildOctree();
+    BuildInstanceBuffer();
     BuildLights();
 
     ThrowIfFailed(mCommandList->Close());
@@ -109,6 +119,8 @@ bool SponzaApp::Initialize()
     mVertexUpload.Reset();
     mIndexUpload.Reset();
     mTessellationVertexUpload.Reset();
+    mCubeVertexUpload.Reset();
+    mCubeIndexUpload.Reset();
     mTextureUploads.clear();
 
     return true;
@@ -133,6 +145,13 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
 {
     if (key == 'F')
         mWireframe = !mWireframe;
+    else if (key == 'C')
+        mFrustumCullingEnabled = !mFrustumCullingEnabled;
+    else if (key == 'O')
+        mOctreeCullingEnabled = !mOctreeCullingEnabled;
+
+    UpdateWindowCaption();
+    SetWindowText(mhMainWnd, mMainWndCaption.c_str());
 }
 
 void SponzaApp::OnMouseDown(WPARAM btnState, int x, int y)
@@ -240,6 +259,7 @@ void SponzaApp::Update(const GameTimer& gt)
     mUVOffset.y = fmodf(gt.TotalTime() * mUVScrollSpeed * 0.5f, 1.f);
 
     UpdateShotLights(gt.DeltaTime());
+    UpdateVisibleInstances(view * proj);
 
     CBPerObject cb = {};
     XMStoreFloat4x4(&cb.World, XMMatrixTranspose(world));
@@ -263,6 +283,7 @@ void SponzaApp::Update(const GameTimer& gt)
     mLights.EyePos = mEyePos;
     mRenderingSystem.UpdateLights(md3dDevice.Get(), mSrvHeap.Get(),
         kLightCbvIndex, mCbvSrvUavDescriptorSize, mLights);
+    UpdateWindowCaption();
 }
 
 // =============================================================
@@ -302,6 +323,27 @@ void SponzaApp::Draw(const GameTimer& gt)
         mCommandList->SetGraphicsRootDescriptorTable(3, whiteHandle);
 
         mCommandList->DrawIndexedInstanced(sm.IndexCount, 1, sm.IndexStart, 0, 0);
+    }
+
+    // ---------- Instanced cubes: frustum culling / octree ----------
+    if (mVisibleObjectCount > 0)
+    {
+        mRenderingSystem.BeginInstancedGeometryPass(mCommandList.Get(), mWireframe);
+        mCommandList->SetGraphicsRootDescriptorTable(
+            0, mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE whiteHandle(
+            mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+            1, mCbvSrvUavDescriptorSize);
+        mCommandList->SetGraphicsRootDescriptorTable(1, whiteHandle);
+        mCommandList->SetGraphicsRootDescriptorTable(2, whiteHandle);
+        mCommandList->SetGraphicsRootDescriptorTable(3, whiteHandle);
+
+        reinterpret_cast<CBPerObject*>(mCbMappedData)->ObjectColor = { 0.18f, 0.72f, 1.0f };
+        D3D12_VERTEX_BUFFER_VIEW views[] = { mCubeVbView, mInstanceVbView };
+        mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        mCommandList->IASetVertexBuffers(0, 2, views);
+        mCommandList->IASetIndexBuffer(&mCubeIbView);
+        mCommandList->DrawIndexedInstanced(36, mVisibleObjectCount, 0, 0, 0);
     }
 
     // ---------- Tessellation pass: displacement + normal map ----------
@@ -432,12 +474,17 @@ void SponzaApp::BuildShadersAndInputLayout()
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24,
           D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
+
+    mInstancedInputLayout = mInputLayout;
+    mInstancedInputLayout.push_back(
+        { "INSTANCE_DATA", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0,
+          D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 });
 }
 
 void SponzaApp::BuildRenderingSystem()
 {
     mRenderingSystem.Initialize(md3dDevice.Get(), mBackBufferFormat,
-        mDepthStencilFormat, mInputLayout, &mGBuffer);
+        mDepthStencilFormat, mInputLayout, mInstancedInputLayout, &mGBuffer);
 }
 
 // =============================================================
@@ -753,6 +800,225 @@ void SponzaApp::BuildTessellatedSurface()
     mTessellationVbView.BufferLocation = mTessellationVertexBuffer->GetGPUVirtualAddress();
     mTessellationVbView.SizeInBytes = sizeof(vertices);
     mTessellationVbView.StrideInBytes = sizeof(Vertex);
+}
+
+void SponzaApp::BuildCubeGeometry()
+{
+    const Vertex vertices[] =
+    {
+        {{-0.5f,-0.5f,-0.5f},{ 0, 0,-1},{0,1}}, {{ 0.5f,-0.5f,-0.5f},{ 0, 0,-1},{1,1}},
+        {{ 0.5f, 0.5f,-0.5f},{ 0, 0,-1},{1,0}}, {{-0.5f, 0.5f,-0.5f},{ 0, 0,-1},{0,0}},
+        {{ 0.5f,-0.5f, 0.5f},{ 0, 0, 1},{0,1}}, {{-0.5f,-0.5f, 0.5f},{ 0, 0, 1},{1,1}},
+        {{-0.5f, 0.5f, 0.5f},{ 0, 0, 1},{1,0}}, {{ 0.5f, 0.5f, 0.5f},{ 0, 0, 1},{0,0}},
+        {{-0.5f, 0.5f,-0.5f},{ 0, 1, 0},{0,1}}, {{ 0.5f, 0.5f,-0.5f},{ 0, 1, 0},{1,1}},
+        {{ 0.5f, 0.5f, 0.5f},{ 0, 1, 0},{1,0}}, {{-0.5f, 0.5f, 0.5f},{ 0, 1, 0},{0,0}},
+        {{-0.5f,-0.5f, 0.5f},{ 0,-1, 0},{0,1}}, {{ 0.5f,-0.5f, 0.5f},{ 0,-1, 0},{1,1}},
+        {{ 0.5f,-0.5f,-0.5f},{ 0,-1, 0},{1,0}}, {{-0.5f,-0.5f,-0.5f},{ 0,-1, 0},{0,0}},
+        {{-0.5f,-0.5f, 0.5f},{-1, 0, 0},{0,1}}, {{-0.5f,-0.5f,-0.5f},{-1, 0, 0},{1,1}},
+        {{-0.5f, 0.5f,-0.5f},{-1, 0, 0},{1,0}}, {{-0.5f, 0.5f, 0.5f},{-1, 0, 0},{0,0}},
+        {{ 0.5f,-0.5f,-0.5f},{ 1, 0, 0},{0,1}}, {{ 0.5f,-0.5f, 0.5f},{ 1, 0, 0},{1,1}},
+        {{ 0.5f, 0.5f, 0.5f},{ 1, 0, 0},{1,0}}, {{ 0.5f, 0.5f,-0.5f},{ 1, 0, 0},{0,0}},
+    };
+    const std::uint16_t indices[] =
+    {
+        0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
+        12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23
+    };
+
+    UploadBufferData(mCubeVertexBuffer, mCubeVertexUpload, vertices, sizeof(vertices),
+        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    UploadBufferData(mCubeIndexBuffer, mCubeIndexUpload, indices, sizeof(indices),
+        D3D12_RESOURCE_STATE_INDEX_BUFFER);
+
+    mCubeVbView = { mCubeVertexBuffer->GetGPUVirtualAddress(), sizeof(vertices), sizeof(Vertex) };
+    mCubeIbView.BufferLocation = mCubeIndexBuffer->GetGPUVirtualAddress();
+    mCubeIbView.SizeInBytes = sizeof(indices);
+    mCubeIbView.Format = DXGI_FORMAT_R16_UINT;
+}
+
+void SponzaApp::BuildSceneObjects()
+{
+    constexpr int side = 48;
+    mSceneObjects.reserve(side * side);
+    unsigned int randomState = 0x1234ABCDu;
+    auto random01 = [&randomState]()
+    {
+        randomState = randomState * 1664525u + 1013904223u;
+        return float((randomState >> 8) & 0x00FFFFFFu) / float(0x01000000u);
+    };
+
+    for (int z = 0; z < side; ++z)
+    {
+        for (int x = 0; x < side; ++x)
+        {
+            const float scale = 18.f + random01() * 34.f;
+            const float px = (x - (side - 1) * 0.5f) * 175.f + (random01() - 0.5f) * 70.f;
+            const float pz = (z - (side - 1) * 0.5f) * 175.f + (random01() - 0.5f) * 70.f;
+            const float py = -70.f + scale * 0.5f;
+            SceneObject object = {};
+            object.Position = { px, py, pz };
+            object.Scale = scale;
+            object.Bounds = { object.Position, { scale * 0.5f, scale * 0.5f, scale * 0.5f } };
+            mSceneObjects.push_back(object);
+        }
+    }
+    mVisibleInstances.reserve(mSceneObjects.size());
+}
+
+void SponzaApp::BuildOctree()
+{
+    mOctreeRoot = std::make_unique<OctreeNode>();
+    mOctreeRoot->Bounds = { { 0.f, 200.f, 0.f }, { 4400.f, 1000.f, 4400.f } };
+    mOctreeRoot->ObjectIndices.resize(mSceneObjects.size());
+    for (UINT i = 0; i < mSceneObjects.size(); ++i)
+        mOctreeRoot->ObjectIndices[i] = i;
+    SubdivideOctree(*mOctreeRoot, 0);
+}
+
+void SponzaApp::BuildInstanceBuffer()
+{
+    const UINT byteSize = static_cast<UINT>(sizeof(InstanceData) * mSceneObjects.size());
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &bufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&mInstanceBuffer)));
+    ThrowIfFailed(mInstanceBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mInstanceMappedData)));
+    mInstanceVbView.BufferLocation = mInstanceBuffer->GetGPUVirtualAddress();
+    mInstanceVbView.SizeInBytes = byteSize;
+    mInstanceVbView.StrideInBytes = sizeof(InstanceData);
+}
+
+std::array<FrustumPlane, 6> SponzaApp::ExtractFrustumPlanes(const XMMATRIX& viewProj) const
+{
+    XMFLOAT4X4 m;
+    XMStoreFloat4x4(&m, viewProj);
+    auto makePlane = [](float x, float y, float z, float w)
+    {
+        const float length = sqrtf(x * x + y * y + z * z);
+        return FrustumPlane{ { x / length, y / length, z / length }, w / length };
+    };
+    return
+    {
+        makePlane(m._11 + m._14, m._21 + m._24, m._31 + m._34, m._41 + m._44),
+        makePlane(-m._11 + m._14, -m._21 + m._24, -m._31 + m._34, -m._41 + m._44),
+        makePlane(m._12 + m._14, m._22 + m._24, m._32 + m._34, m._42 + m._44),
+        makePlane(-m._12 + m._14, -m._22 + m._24, -m._32 + m._34, -m._42 + m._44),
+        makePlane(m._13, m._23, m._33, m._43),
+        makePlane(-m._13 + m._14, -m._23 + m._24, -m._33 + m._34, -m._43 + m._44)
+    };
+}
+
+bool SponzaApp::IntersectsFrustum(const BoundingBox& box,
+    const std::array<FrustumPlane, 6>& planes) const
+{
+    for (const FrustumPlane& plane : planes)
+    {
+        const float radius = fabsf(plane.Normal.x) * box.Extents.x
+            + fabsf(plane.Normal.y) * box.Extents.y
+            + fabsf(plane.Normal.z) * box.Extents.z;
+        const float distance = plane.Normal.x * box.Center.x
+            + plane.Normal.y * box.Center.y + plane.Normal.z * box.Center.z
+            + plane.Distance;
+        if (distance + radius < 0.f)
+            return false;
+    }
+    return true;
+}
+
+void SponzaApp::SubdivideOctree(OctreeNode& node, int depth)
+{
+    if (node.ObjectIndices.size() <= 24 || depth >= 5)
+        return;
+
+    const XMFLOAT3 childExtents = { node.Bounds.Extents.x * 0.5f,
+        node.Bounds.Extents.y * 0.5f, node.Bounds.Extents.z * 0.5f };
+    for (int i = 0; i < 8; ++i)
+    {
+        const XMFLOAT3 center =
+        {
+            node.Bounds.Center.x + ((i & 1) ? childExtents.x : -childExtents.x),
+            node.Bounds.Center.y + ((i & 2) ? childExtents.y : -childExtents.y),
+            node.Bounds.Center.z + ((i & 4) ? childExtents.z : -childExtents.z)
+        };
+        node.Children[i] = std::make_unique<OctreeNode>();
+        node.Children[i]->Bounds = { center, childExtents };
+    }
+
+    std::vector<UINT> remaining;
+    for (UINT objectIndex : node.ObjectIndices)
+    {
+        const BoundingBox& box = mSceneObjects[objectIndex].Bounds;
+        int childIndex = 0;
+        const float minX = box.Center.x - box.Extents.x, maxX = box.Center.x + box.Extents.x;
+        const float minY = box.Center.y - box.Extents.y, maxY = box.Center.y + box.Extents.y;
+        const float minZ = box.Center.z - box.Extents.z, maxZ = box.Center.z + box.Extents.z;
+        if (maxX <= node.Bounds.Center.x) {} else if (minX >= node.Bounds.Center.x) childIndex |= 1; else { remaining.push_back(objectIndex); continue; }
+        if (maxY <= node.Bounds.Center.y) {} else if (minY >= node.Bounds.Center.y) childIndex |= 2; else { remaining.push_back(objectIndex); continue; }
+        if (maxZ <= node.Bounds.Center.z) {} else if (minZ >= node.Bounds.Center.z) childIndex |= 4; else { remaining.push_back(objectIndex); continue; }
+        node.Children[childIndex]->ObjectIndices.push_back(objectIndex);
+    }
+    node.ObjectIndices = std::move(remaining);
+    for (auto& child : node.Children)
+        if (!child->ObjectIndices.empty())
+            SubdivideOctree(*child, depth + 1);
+}
+
+void SponzaApp::QueryOctree(const OctreeNode& node,
+    const std::array<FrustumPlane, 6>& planes, std::vector<UINT>& visible) const
+{
+    if (!IntersectsFrustum(node.Bounds, planes))
+        return;
+
+    for (UINT objectIndex : node.ObjectIndices)
+        if (IntersectsFrustum(mSceneObjects[objectIndex].Bounds, planes))
+            visible.push_back(objectIndex);
+
+    for (const auto& child : node.Children)
+        if (child)
+            QueryOctree(*child, planes, visible);
+}
+
+void SponzaApp::UpdateVisibleInstances(const XMMATRIX& viewProj)
+{
+    std::vector<UINT> visible;
+    visible.reserve(mSceneObjects.size());
+    if (!mFrustumCullingEnabled)
+    {
+        for (UINT i = 0; i < mSceneObjects.size(); ++i)
+            visible.push_back(i);
+    }
+    else
+    {
+        const auto planes = ExtractFrustumPlanes(viewProj);
+        if (mOctreeCullingEnabled)
+            QueryOctree(*mOctreeRoot, planes, visible);
+        else
+            for (UINT i = 0; i < mSceneObjects.size(); ++i)
+                if (IntersectsFrustum(mSceneObjects[i].Bounds, planes))
+                    visible.push_back(i);
+    }
+
+    mVisibleInstances.clear();
+    for (UINT objectIndex : visible)
+    {
+        const SceneObject& object = mSceneObjects[objectIndex];
+        mVisibleInstances.push_back({ { object.Position.x, object.Position.y,
+            object.Position.z, object.Scale } });
+    }
+    mVisibleObjectCount = static_cast<UINT>(mVisibleInstances.size());
+    if (mVisibleObjectCount > 0)
+        memcpy(mInstanceMappedData, mVisibleInstances.data(),
+            sizeof(InstanceData) * mVisibleObjectCount);
+}
+
+void SponzaApp::UpdateWindowCaption()
+{
+    mMainWndCaption = L"Sponza - WASD: move | LMB: shoot | RMB: orbit | F: wireframe"
+        L" | C: culling " + std::wstring(mFrustumCullingEnabled ? L"ON" : L"OFF")
+        + L" | O: octree " + std::wstring(mOctreeCullingEnabled ? L"ON" : L"OFF")
+        + L" | cubes: " + std::to_wstring(mVisibleObjectCount)
+        + L"/" + std::to_wstring(mSceneObjects.size());
 }
 
 // =============================================================

@@ -27,12 +27,14 @@ static ComPtr<ID3DBlob> CompileShader(const wchar_t* file, const char* entry, co
 void RenderingSystem::Initialize(ID3D12Device* device,
     DXGI_FORMAT backBufferFormat, DXGI_FORMAT depthStencilFormat,
     const std::vector<D3D12_INPUT_ELEMENT_DESC>& inputLayout,
+    const std::vector<D3D12_INPUT_ELEMENT_DESC>& instancedInputLayout,
     GBuffer* gbuffer)
 {
     BuildGeometryRootSignature(device);
     BuildLightingRootSignature(device);
     BuildShaders();
-    BuildPSOs(device, backBufferFormat, depthStencilFormat, inputLayout, gbuffer);
+    BuildPSOs(device, backBufferFormat, depthStencilFormat, inputLayout,
+        instancedInputLayout, gbuffer);
 
     UINT cbSize = (sizeof(CBFrameLights) + 255) & ~255;
     CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
@@ -78,6 +80,14 @@ void RenderingSystem::BeginGeometryPass(ID3D12GraphicsCommandList* cmdList, GBuf
 void RenderingSystem::BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, bool wireframe)
 {
     cmdList->SetPipelineState(wireframe ? mTessellationWirePSO.Get() : mTessellationPSO.Get());
+    cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
+}
+
+void RenderingSystem::BeginInstancedGeometryPass(ID3D12GraphicsCommandList* cmdList,
+    bool wireframe)
+{
+    cmdList->SetPipelineState(wireframe ? mInstancedGeometryWirePSO.Get()
+        : mInstancedGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
 }
 
@@ -162,6 +172,7 @@ void RenderingSystem::BuildLightingRootSignature(ID3D12Device* device)
 void RenderingSystem::BuildShaders()
 {
     mGeometryVS = CompileShader(L"shader.hlsl", "GeometryVS", "vs_5_0");
+    mInstancedGeometryVS = CompileShader(L"shader.hlsl", "InstancedGeometryVS", "vs_5_0");
     mGeometryPS = CompileShader(L"shader.hlsl", "GeometryPS", "ps_5_0");
     mTessellationVS = CompileShader(L"shader.hlsl", "TessellationVS", "vs_5_0");
     mTessellationHS = CompileShader(L"shader.hlsl", "TessellationHS", "hs_5_0");
@@ -173,6 +184,7 @@ void RenderingSystem::BuildShaders()
 void RenderingSystem::BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
     DXGI_FORMAT depthStencilFormat,
     const std::vector<D3D12_INPUT_ELEMENT_DESC>& inputLayout,
+    const std::vector<D3D12_INPUT_ELEMENT_DESC>& instancedInputLayout,
     GBuffer* gbuffer)
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC geo = {};
@@ -197,6 +209,17 @@ void RenderingSystem::BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferForm
     D3D12_GRAPHICS_PIPELINE_STATE_DESC wire = geo;
     wire.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailedRS(device->CreateGraphicsPipelineState(&wire, IID_PPV_ARGS(&mGeometryWirePSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC instanced = geo;
+    instanced.InputLayout = { instancedInputLayout.data(), (UINT)instancedInputLayout.size() };
+    instanced.VS = { mInstancedGeometryVS->GetBufferPointer(), mInstancedGeometryVS->GetBufferSize() };
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(
+        &instanced, IID_PPV_ARGS(&mInstancedGeometryPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC instancedWire = instanced;
+    instancedWire.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(
+        &instancedWire, IID_PPV_ARGS(&mInstancedGeometryWirePSO)));
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC tessellation = geo;
     tessellation.VS = { mTessellationVS->GetBufferPointer(), mTessellationVS->GetBufferSize() };

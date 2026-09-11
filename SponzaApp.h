@@ -91,6 +91,11 @@ struct CBPerObject
     XMFLOAT2   RenderTargetSize;
 };
 
+struct CBShadow
+{
+    XMFLOAT4X4 LightViewProj;
+};
+
 class SponzaApp : public D3DApp
 {
 public:
@@ -116,6 +121,8 @@ private:
     void BuildDescriptorHeap();
     void BuildConstantBuffer();
     void BuildTessellationConstantBuffer();
+    void BuildShadowResources();
+    void BuildShadowConstantBuffer();
     void BuildShadersAndInputLayout();
     void BuildGeometry();
     void BuildTessellatedSurface();
@@ -135,6 +142,8 @@ private:
     void UpdateCameraMovement(float deltaTime);
     void UpdateVisibleInstances(const XMMATRIX& viewProj);
     void UpdateWindowCaption();
+    void UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj);
+    void DrawShadowMaps();
     bool IntersectsFrustum(const BoundingBox& box,
         const std::array<FrustumPlane, 6>& planes) const;
     std::array<FrustumPlane, 6> ExtractFrustumPlanes(const XMMATRIX& viewProj) const;
@@ -160,7 +169,10 @@ private:
     static const int kTessellationNormalIndex = kTessellationAlbedoIndex + 1;
     static const int kTessellationDisplacementIndex = kTessellationNormalIndex + 1;
     static const int kTessellationCbvIndex = kTessellationDisplacementIndex + 1;
-    static const int kTotalSrvSlots = kTessellationCbvIndex + 1;
+    static const int kShadowMapSrvIndex = kTessellationCbvIndex + 1;
+    static const int kTotalSrvSlots = kShadowMapSrvIndex + 1;
+    static const UINT kCascadeCount = 3;
+    static const UINT kShadowMapSize = 2048;
 
     ComPtr<ID3D12DescriptorHeap> mSrvHeap;
 
@@ -201,6 +213,16 @@ private:
     BYTE* mCbMappedData = nullptr;
     ComPtr<ID3D12Resource> mTessellationConstantBuffer;
     BYTE* mTessellationCbMappedData = nullptr;
+
+    ComPtr<ID3D12Resource> mShadowMap;
+    ComPtr<ID3D12DescriptorHeap> mShadowDsvHeap;
+    ComPtr<ID3D12Resource> mShadowConstantBuffer;
+    BYTE* mShadowCbMappedData = nullptr;
+    UINT mShadowCbStride = 0;
+    D3D12_VIEWPORT mShadowViewport = {};
+    D3D12_RECT mShadowScissor = {};
+    std::array<XMFLOAT4X4, kCascadeCount> mCascadeLightViewProj = {};
+    XMFLOAT4 mCascadeSplits = {};
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInstancedInputLayout;

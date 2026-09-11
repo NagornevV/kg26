@@ -80,6 +80,12 @@ SponzaApp::~SponzaApp()
         mInstanceBuffer->Unmap(0, nullptr);
         mInstanceMappedData = nullptr;
     }
+
+    if (mShadowCbMappedData)
+    {
+        mShadowConstantBuffer->Unmap(0, nullptr);
+        mShadowCbMappedData = nullptr;
+    }
 }
 
 // =============================================================
@@ -94,6 +100,7 @@ bool SponzaApp::Initialize()
     BuildDescriptorHeap();
     BuildConstantBuffer();
     BuildTessellationConstantBuffer();
+    BuildShadowConstantBuffer();
     BuildShadersAndInputLayout();
 
     // GBuffer создаётся до PSO, потому что форматы MRT нужны при создании pipeline state.
@@ -101,6 +108,7 @@ bool SponzaApp::Initialize()
         mSrvHeap.Get(), kGBufferSrvStart, mCbvSrvUavDescriptorSize);
 
     BuildRenderingSystem();
+    BuildShadowResources();
     CreateWhiteTexture();
     LoadTessellationTextures();
     LoadModel("sponza/sponza.obj");
@@ -259,6 +267,7 @@ void SponzaApp::Update(const GameTimer& gt)
     mUVOffset.y = fmodf(gt.TotalTime() * mUVScrollSpeed * 0.5f, 1.f);
 
     UpdateShotLights(gt.DeltaTime());
+    UpdateCascades(view, proj);
     UpdateVisibleInstances(view * proj);
 
     CBPerObject cb = {};
@@ -281,6 +290,10 @@ void SponzaApp::Update(const GameTimer& gt)
     memcpy(mTessellationCbMappedData, &tessellationCb, sizeof(CBPerObject));
 
     mLights.EyePos = mEyePos;
+    XMStoreFloat4x4(&mLights.CameraView, XMMatrixTranspose(view));
+    for (UINT i = 0; i < kCascadeCount; ++i)
+        mLights.ShadowViewProj[i] = mCascadeLightViewProj[i];
+    mLights.CascadeSplits = mCascadeSplits;
     mRenderingSystem.UpdateLights(md3dDevice.Get(), mSrvHeap.Get(),
         kLightCbvIndex, mCbvSrvUavDescriptorSize, mLights);
     UpdateWindowCaption();
@@ -297,6 +310,10 @@ void SponzaApp::Draw(const GameTimer& gt)
 
     ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
     mCommandList->SetDescriptorHeaps(1, heaps);
+
+    DrawShadowMaps();
+    mCommandList->RSSetViewports(1, &mScreenViewport);
+    mCommandList->RSSetScissorRects(1, &mScissorRect);
 
     // ---------- 1. Geometry pass: рисуем Sponza в GBuffer ----------
     mRenderingSystem.BeginGeometryPass(mCommandList.Get(), &mGBuffer,
@@ -386,6 +403,10 @@ void SponzaApp::Draw(const GameTimer& gt)
 
     mRenderingSystem.BeginLightingPass(mCommandList.Get(), mSrvHeap.Get(),
         kGBufferSrvStart, kLightCbvIndex, mCbvSrvUavDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE shadowMapSrv(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        kShadowMapSrvIndex, mCbvSrvUavDescriptorSize);
+    mCommandList->SetGraphicsRootDescriptorTable(2, shadowMapSrv);
     mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     mCommandList->IASetVertexBuffers(0, 0, nullptr);
     mCommandList->IASetIndexBuffer(nullptr);
@@ -460,6 +481,162 @@ void SponzaApp::BuildTessellationConstantBuffer()
         mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
         kTessellationCbvIndex, mCbvSrvUavDescriptorSize);
     md3dDevice->CreateConstantBufferView(&cbvDesc, h);
+}
+
+void SponzaApp::BuildShadowConstantBuffer()
+{
+    mShadowCbStride = (sizeof(CBShadow) + 255) & ~255;
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    auto cbDesc = CD3DX12_RESOURCE_DESC::Buffer(mShadowCbStride * kCascadeCount);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &cbDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&mShadowConstantBuffer)));
+    ThrowIfFailed(mShadowConstantBuffer->Map(0, nullptr,
+        reinterpret_cast<void**>(&mShadowCbMappedData)));
+}
+
+void SponzaApp::BuildShadowResources()
+{
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = kShadowMapSize;
+    desc.Height = kShadowMapSize;
+    desc.DepthOrArraySize = kCascadeCount;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    desc.SampleDesc = { 1, 0 };
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE clearValue = { DXGI_FORMAT_D32_FLOAT, { 1.0f, 0 } };
+    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+        &desc, D3D12_RESOURCE_STATE_GENERIC_READ, &clearValue,
+        IID_PPV_ARGS(&mShadowMap)));
+
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+    dsvHeapDesc.NumDescriptors = kCascadeCount;
+    dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&dsvHeapDesc,
+        IID_PPV_ARGS(&mShadowDsvHeap)));
+    const UINT dsvSize = md3dDevice->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    for (UINT i = 0; i < kCascadeCount; ++i)
+    {
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+        dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+        dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+        dsvDesc.Texture2DArray.FirstArraySlice = i;
+        dsvDesc.Texture2DArray.ArraySize = 1;
+        CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
+            mShadowDsvHeap->GetCPUDescriptorHandleForHeapStart(), i, dsvSize);
+        md3dDevice->CreateDepthStencilView(mShadowMap.Get(), &dsvDesc, handle);
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2DArray.ArraySize = kCascadeCount;
+    srvDesc.Texture2DArray.MipLevels = 1;
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+        mSrvHeap->GetCPUDescriptorHandleForHeapStart(), kShadowMapSrvIndex,
+        mCbvSrvUavDescriptorSize);
+    md3dDevice->CreateShaderResourceView(mShadowMap.Get(), &srvDesc, srvHandle);
+
+    mShadowViewport = { 0.0f, 0.0f, (float)kShadowMapSize, (float)kShadowMapSize, 0.0f, 1.0f };
+    mShadowScissor = { 0, 0, (LONG)kShadowMapSize, (LONG)kShadowMapSize };
+}
+
+void SponzaApp::UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj)
+{
+    const float nearZ = 1.0f;
+    const float farZ = 5000.0f;
+    const float lambda = 0.75f;
+    float splits[kCascadeCount] = {};
+    for (UINT i = 0; i < kCascadeCount; ++i)
+    {
+        const float p = float(i + 1) / float(kCascadeCount);
+        const float logarithmic = nearZ * powf(farZ / nearZ, p);
+        const float uniform = nearZ + (farZ - nearZ) * p;
+        splits[i] = lambda * logarithmic + (1.0f - lambda) * uniform;
+    }
+    mCascadeSplits = { splits[0], splits[1], splits[2], farZ };
+
+    XMVECTOR forward = XMVector3Normalize(XMVectorSubtract(
+        XMLoadFloat3(&mCameraTarget), XMLoadFloat3(&mEyePos)));
+    XMVECTOR worldUp = XMVectorSet(0.f, 1.f, 0.f, 0.f);
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(worldUp, forward));
+    XMVECTOR up = XMVector3Normalize(XMVector3Cross(forward, right));
+    const float tanHalfFov = tanf(XM_PIDIV4 * 0.5f);
+    const float aspect = AspectRatio();
+    const XMVECTOR lightDirection = XMVector3Normalize(XMLoadFloat3(&mLights.DirLightDir));
+
+    float previousSplit = nearZ;
+    for (UINT cascade = 0; cascade < kCascadeCount; ++cascade)
+    {
+        XMVECTOR corners[8];
+        UINT cornerIndex = 0;
+        for (float distance : { previousSplit, splits[cascade] })
+        {
+            const float halfHeight = distance * tanHalfFov;
+            const float halfWidth = halfHeight * aspect;
+            XMVECTOR center = XMVectorAdd(XMLoadFloat3(&mEyePos), XMVectorScale(forward, distance));
+            XMVECTOR horizontal = XMVectorScale(right, halfWidth);
+            XMVECTOR vertical = XMVectorScale(up, halfHeight);
+            corners[cornerIndex++] = XMVectorSubtract(XMVectorSubtract(center, horizontal), vertical);
+            corners[cornerIndex++] = XMVectorSubtract(XMVectorAdd(center, horizontal), vertical);
+            corners[cornerIndex++] = XMVectorAdd(XMVectorAdd(center, horizontal), vertical);
+            corners[cornerIndex++] = XMVectorAdd(XMVectorSubtract(center, horizontal), vertical);
+        }
+        previousSplit = splits[cascade];
+
+        XMVECTOR center = XMVectorZero();
+        for (const XMVECTOR& corner : corners) center = XMVectorAdd(center, corner);
+        center = XMVectorScale(center, 1.0f / 8.0f);
+        XMVECTOR lightUp = (fabsf(XMVectorGetY(lightDirection)) > 0.95f)
+            ? XMVectorSet(0.f, 0.f, 1.f, 0.f) : worldUp;
+        XMMATRIX lightView = XMMatrixLookAtLH(XMVectorSubtract(center,
+            XMVectorScale(lightDirection, 6000.0f)), center, lightUp);
+
+        XMFLOAT3 minimum = { FLT_MAX, FLT_MAX, FLT_MAX };
+        XMFLOAT3 maximum = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+        for (const XMVECTOR& corner : corners)
+        {
+            XMFLOAT3 p;
+            XMStoreFloat3(&p, XMVector3TransformCoord(corner, lightView));
+            minimum.x = (std::min)(minimum.x, p.x); minimum.y = (std::min)(minimum.y, p.y); minimum.z = (std::min)(minimum.z, p.z);
+            maximum.x = (std::max)(maximum.x, p.x); maximum.y = (std::max)(maximum.y, p.y); maximum.z = (std::max)(maximum.z, p.z);
+        }
+        const float zPadding = 1000.0f;
+        XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(minimum.x, maximum.x,
+            minimum.y, maximum.y, (std::max)(0.1f, minimum.z - zPadding), maximum.z + zPadding);
+        XMStoreFloat4x4(&mCascadeLightViewProj[cascade], XMMatrixTranspose(lightView * lightProj));
+        CBShadow shadow = { mCascadeLightViewProj[cascade] };
+        memcpy(mShadowCbMappedData + cascade * mShadowCbStride, &shadow, sizeof(CBShadow));
+    }
+}
+
+void SponzaApp::DrawShadowMaps()
+{
+    auto toDepth = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
+        D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    mCommandList->ResourceBarrier(1, &toDepth);
+    const UINT dsvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    for (UINT cascade = 0; cascade < kCascadeCount; ++cascade)
+    {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE dsv(mShadowDsvHeap->GetCPUDescriptorHandleForHeapStart(),
+            cascade, dsvSize);
+        mRenderingSystem.BeginShadowPass(mCommandList.Get(), dsv, mShadowViewport, mShadowScissor);
+        mCommandList->SetGraphicsRootConstantBufferView(0,
+            mShadowConstantBuffer->GetGPUVirtualAddress() + cascade * mShadowCbStride);
+        mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        mCommandList->IASetVertexBuffers(0, 1, &mVbView);
+        mCommandList->IASetIndexBuffer(&mIbView);
+        for (const auto& submesh : mSubMeshes)
+            mCommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexStart, 0, 0);
+    }
+    auto toRead = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
+    mCommandList->ResourceBarrier(1, &toRead);
 }
 
 // =============================================================

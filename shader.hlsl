@@ -32,12 +32,22 @@ cbuffer CBFrameLights : register(b1)
     float3 gDirLightColor; float gPad1;
     PointLight gPoints[16];
     SpotLight  gSpots[4];
+    float4x4   gCameraView;
+    float4x4   gShadowViewProj[3];
+    float4     gCascadeSplits;
+};
+
+cbuffer CBShadow : register(b2)
+{
+    float4x4 gLightViewProj;
 };
 
 Texture2D    gTexture0   : register(t0);
 Texture2D    gTexture1   : register(t1);
 Texture2D    gTexture2   : register(t2);
+Texture2DArray<float> gShadowMap : register(t3);
 SamplerState gSampler    : register(s0);
+SamplerComparisonState gShadowSampler : register(s1);
 
 struct VSIn
 {
@@ -99,6 +109,11 @@ GBufferOut GeometryPS(GeoVSOut pin)
     gout.Normal   = float4(normalW * 0.5f + 0.5f, 1.0f);
     gout.Position = float4(pin.PosW, 1.0f);
     return gout;
+}
+
+float4 ShadowVS(VSIn vin) : SV_POSITION
+{
+    return mul(float4(vin.PosL, 1.0f), gLightViewProj);
 }
 
 struct InstancedVSIn
@@ -263,6 +278,33 @@ float3 CalcSpot(SpotLight l, float3 posW, float3 normalW, float3 viewDir)
     return (diff + 0.3f * spec) * l.Color * l.Intensity * att * spot;
 }
 
+float CalcShadow(float3 posW, float3 normalW)
+{
+    float viewDepth = abs(mul(float4(posW, 1.0f), gCameraView).z);
+    uint cascade = (viewDepth < gCascadeSplits.x) ? 0
+        : ((viewDepth < gCascadeSplits.y) ? 1 : 2);
+
+    float4 shadowPos = mul(float4(posW, 1.0f), gShadowViewProj[cascade]);
+    shadowPos.xyz /= max(shadowPos.w, 0.0001f);
+    float2 uv = shadowPos.xy * float2(0.5f, -0.5f) + 0.5f;
+    if (uv.x <= 0.0f || uv.x >= 1.0f || uv.y <= 0.0f || uv.y >= 1.0f
+        || shadowPos.z <= 0.0f || shadowPos.z >= 1.0f)
+        return 1.0f;
+
+    float bias = max(0.00035f, 0.0025f * (1.0f - dot(normalW, normalize(-gDirLightDir))));
+    float2 texel = 1.0f / 2048.0f;
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+            visibility += gShadowMap.SampleCmpLevelZero(gShadowSampler,
+                float3(uv + float2(x, y) * texel, cascade), shadowPos.z - bias);
+    }
+    return visibility / 9.0f;
+}
+
 float4 LightingPS(LightVSOut pin) : SV_Target
 {
     float3 albedo = gTexture0.Sample(gSampler, pin.TexC).rgb;
@@ -281,7 +323,7 @@ float4 LightingPS(LightVSOut pin) : SV_Target
     float diff = max(dot(normalW, L), 0.0f);
     float3 H = normalize(L + viewDir);
     float spec = pow(max(dot(normalW, H), 0.0f), 32.0f);
-    lighting += (diff + 0.18f * spec) * gDirLightColor;
+    lighting += (diff + 0.18f * spec) * gDirLightColor * CalcShadow(posW, normalW);
 
     [loop]
     for (int i = 0; i < (int)gPointCount; ++i)

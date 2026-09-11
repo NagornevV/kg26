@@ -31,6 +31,9 @@ struct CBFrameLights
     XMFLOAT3 DirLightColor;float Pad0;
     PointLight Points[16];
     SpotLight  Spots[4];
+    XMFLOAT4X4 CameraView;
+    XMFLOAT4X4 ShadowViewProj[3];
+    XMFLOAT4   CascadeSplits;
 };
 
 // RenderingSystem разделяет рендер на 2 прохода:
@@ -54,6 +57,9 @@ public:
 
     void BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
     void BeginInstancedGeometryPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
+    void BeginShadowPass(ID3D12GraphicsCommandList* cmdList,
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv, const D3D12_VIEWPORT& viewport,
+        const D3D12_RECT& scissor);
 
     void BeginLightingPass(ID3D12GraphicsCommandList* cmdList,
         ID3D12DescriptorHeap* srvHeap, UINT gbufferSrvIndex,
@@ -61,12 +67,14 @@ public:
 
     ID3D12RootSignature* GeometryRootSignature() const { return mGeometryRootSignature.Get(); }
     ID3D12RootSignature* LightingRootSignature() const { return mLightingRootSignature.Get(); }
+    ID3D12RootSignature* ShadowRootSignature() const { return mShadowRootSignature.Get(); }
     ID3D12Resource* LightConstantBuffer() const { return mLightCB.Get(); }
     BYTE* LightMappedData() const { return mLightMappedData; }
 
 private:
     void BuildGeometryRootSignature(ID3D12Device* device);
     void BuildLightingRootSignature(ID3D12Device* device);
+    void BuildShadowRootSignature(ID3D12Device* device);
     void BuildShaders();
     void BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat,
@@ -77,6 +85,7 @@ private:
 private:
     ComPtr<ID3D12RootSignature> mGeometryRootSignature;
     ComPtr<ID3D12RootSignature> mLightingRootSignature;
+    ComPtr<ID3D12RootSignature> mShadowRootSignature;
 
     ComPtr<ID3DBlob> mGeometryVS;
     ComPtr<ID3DBlob> mInstancedGeometryVS;
@@ -86,6 +95,7 @@ private:
     ComPtr<ID3DBlob> mTessellationDS;
     ComPtr<ID3DBlob> mLightingVS;
     ComPtr<ID3DBlob> mLightingPS;
+    ComPtr<ID3DBlob> mShadowVS;
 
     ComPtr<ID3D12PipelineState> mGeometryPSO;
     ComPtr<ID3D12PipelineState> mGeometryWirePSO;
@@ -94,6 +104,7 @@ private:
     ComPtr<ID3D12PipelineState> mTessellationPSO;
     ComPtr<ID3D12PipelineState> mTessellationWirePSO;
     ComPtr<ID3D12PipelineState> mLightingPSO;
+    ComPtr<ID3D12PipelineState> mShadowPSO;
 
     ComPtr<ID3D12Resource> mLightCB;
     BYTE* mLightMappedData = nullptr;

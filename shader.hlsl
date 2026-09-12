@@ -35,6 +35,7 @@ cbuffer CBFrameLights : register(b1)
     float4x4   gCameraView;
     float4x4   gShadowViewProj[3];
     float4     gCascadeSplits;
+    float4     gPostProcess;
 };
 
 cbuffer CBShadow : register(b2)
@@ -357,7 +358,9 @@ struct LightVSOut
 LightVSOut LightingVS(uint vertexID : SV_VertexID)
 {
     LightVSOut o;
-    float2 uv = float2((vertexID << 1) & 2, vertexID & 2);
+    // Four vertices of a triangle strip.  No vertex buffer is bound:
+    // SV_VertexID generates both the clip-space position and UV.
+    float2 uv = float2((vertexID >> 1) & 1, vertexID & 1);
     o.TexC = uv;
     o.PosH = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     return o;
@@ -427,27 +430,44 @@ float4 LightingPS(LightVSOut pin) : SV_Target
     float3 normalW = normalize(gTexture1.Sample(gSampler, pin.TexC).rgb * 2.0f - 1.0f);
     float3 posW = gTexture2.Sample(gSampler, pin.TexC).xyz;
 
+    float3 finalColor;
     // Пустой пиксель GBuffer — фон.
     if (length(albedo) < 0.001f)
-        return float4(0.02f, 0.02f, 0.025f, 1.0f);
+        finalColor = float3(0.02f, 0.02f, 0.025f);
+    else
+    {
+        float3 viewDir = normalize(gEyePos - posW);
+        float3 lighting = 0.08f; // ambient
 
-    float3 viewDir = normalize(gEyePos - posW);
-    float3 lighting = 0.08f; // ambient
+        // Directional light.
+        float3 L = normalize(-gDirLightDir);
+        float diff = max(dot(normalW, L), 0.0f);
+        float3 H = normalize(L + viewDir);
+        float spec = pow(max(dot(normalW, H), 0.0f), 32.0f);
+        lighting += (diff + 0.18f * spec) * gDirLightColor * CalcShadow(posW, normalW);
 
-    // Directional light.
-    float3 L = normalize(-gDirLightDir);
-    float diff = max(dot(normalW, L), 0.0f);
-    float3 H = normalize(L + viewDir);
-    float spec = pow(max(dot(normalW, H), 0.0f), 32.0f);
-    lighting += (diff + 0.18f * spec) * gDirLightColor * CalcShadow(posW, normalW);
+        [loop]
+        for (int i = 0; i < (int)gPointCount; ++i)
+            lighting += CalcPoint(gPoints[i], posW, normalW, viewDir);
 
-    [loop]
-    for (int i = 0; i < (int)gPointCount; ++i)
-        lighting += CalcPoint(gPoints[i], posW, normalW, viewDir);
+        [loop]
+        for (int s = 0; s < (int)gSpotCount; ++s)
+            lighting += CalcSpot(gSpots[s], posW, normalW, viewDir);
 
-    [loop]
-    for (int s = 0; s < (int)gSpotCount; ++s)
-        lighting += CalcSpot(gSpots[s], posW, normalW, viewDir);
+        finalColor = saturate(albedo * lighting);
+    }
 
-    return float4(saturate(albedo * lighting), 1.0f);
+    // Post-effect 1: final gamma correction from linear color to display space.
+    if (gPostProcess.x > 0.5f)
+        finalColor = pow(saturate(finalColor), 1.0f / 2.2f);
+
+    // Post-effect 2: camera vignette.  Corners darken smoothly.
+    if (gPostProcess.y > 0.5f)
+    {
+        float2 fromCenter = (pin.TexC - 0.5f) * float2(1.55f, 1.0f);
+        float edge = smoothstep(0.20f, 1.15f, dot(fromCenter, fromCenter));
+        finalColor *= 1.0f - edge * 0.45f;
+    }
+
+    return float4(finalColor, 1.0f);
 }

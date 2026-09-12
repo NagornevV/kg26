@@ -34,6 +34,7 @@ struct CBFrameLights
     XMFLOAT4X4 CameraView;
     XMFLOAT4X4 ShadowViewProj[3];
     XMFLOAT4   CascadeSplits;
+    XMFLOAT4   PostProcess; // x: gamma, y: vignette
 };
 
 // RenderingSystem разделяет рендер на 2 прохода:

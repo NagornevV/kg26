@@ -277,6 +277,8 @@ private:
     bool mFrustumCullingEnabled = true;
     bool mOctreeCullingEnabled = true;
     bool mParticlesEnabled = true;
+    bool mGammaCorrectionEnabled = true;
+    bool mVignetteEnabled = true;
 
     // Камера
     float    mYaw = 0.f;

@@ -175,6 +175,10 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
         mOctreeCullingEnabled = !mOctreeCullingEnabled;
     else if (key == 'P')
         mParticlesEnabled = !mParticlesEnabled;
+    else if (key == 'G')
+        mGammaCorrectionEnabled = !mGammaCorrectionEnabled;
+    else if (key == 'V')
+        mVignetteEnabled = !mVignetteEnabled;
 
     UpdateWindowCaption();
     SetWindowText(mhMainWnd, mMainWndCaption.c_str());
@@ -312,6 +316,8 @@ void SponzaApp::Update(const GameTimer& gt)
     for (UINT i = 0; i < kCascadeCount; ++i)
         mLights.ShadowViewProj[i] = mCascadeLightViewProj[i];
     mLights.CascadeSplits = mCascadeSplits;
+    mLights.PostProcess = { mGammaCorrectionEnabled ? 1.0f : 0.0f,
+        mVignetteEnabled ? 1.0f : 0.0f, 0.0f, 0.0f };
     mRenderingSystem.UpdateLights(md3dDevice.Get(), mSrvHeap.Get(),
         kLightCbvIndex, mCbvSrvUavDescriptorSize, mLights);
 
@@ -448,10 +454,11 @@ void SponzaApp::Draw(const GameTimer& gt)
         mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
         kShadowMapSrvIndex, mCbvSrvUavDescriptorSize);
     mCommandList->SetGraphicsRootDescriptorTable(2, shadowMapSrv);
-    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // Full-screen quad is generated in LightingVS from SV_VertexID, no vertex buffer.
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     mCommandList->IASetVertexBuffers(0, 0, nullptr);
     mCommandList->IASetIndexBuffer(nullptr);
-    mCommandList->DrawInstanced(3, 1, 0, 0);
+    mCommandList->DrawInstanced(4, 1, 0, 0);
 
     auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -1394,6 +1401,8 @@ void SponzaApp::UpdateWindowCaption()
         L" | C: culling " + std::wstring(mFrustumCullingEnabled ? L"ON" : L"OFF")
         + L" | O: octree " + std::wstring(mOctreeCullingEnabled ? L"ON" : L"OFF")
         + L" | P: particles " + std::wstring(mParticlesEnabled ? L"ON" : L"OFF")
+        + L" | G: gamma " + std::wstring(mGammaCorrectionEnabled ? L"ON" : L"OFF")
+        + L" | V: vignette " + std::wstring(mVignetteEnabled ? L"ON" : L"OFF")
         + L" | cubes: " + std::to_wstring(mVisibleObjectCount)
         + L"/" + std::to_wstring(mSceneObjects.size());
 }

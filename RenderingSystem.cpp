@@ -33,6 +33,7 @@ void RenderingSystem::Initialize(ID3D12Device* device,
     BuildGeometryRootSignature(device);
     BuildLightingRootSignature(device);
     BuildShadowRootSignature(device);
+    BuildParticleRootSignatures(device);
     BuildShaders();
     BuildPSOs(device, backBufferFormat, depthStencilFormat, inputLayout,
         instancedInputLayout, gbuffer);
@@ -90,6 +91,42 @@ void RenderingSystem::BeginInstancedGeometryPass(ID3D12GraphicsCommandList* cmdL
     cmdList->SetPipelineState(wireframe ? mInstancedGeometryWirePSO.Get()
         : mInstancedGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
+}
+
+void RenderingSystem::BeginParticleCompute(ID3D12GraphicsCommandList* cmdList,
+    ID3D12DescriptorHeap* srvHeap, UINT inputUavIndex, UINT outputUavIndex,
+    UINT descriptorSize, D3D12_GPU_VIRTUAL_ADDRESS particleComputeCb)
+{
+    cmdList->SetPipelineState(mParticleComputePSO.Get());
+    cmdList->SetComputeRootSignature(mParticleComputeRootSignature.Get());
+    cmdList->SetComputeRootConstantBufferView(0, particleComputeCb);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE input(
+        srvHeap->GetGPUDescriptorHandleForHeapStart(), inputUavIndex, descriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE output(
+        srvHeap->GetGPUDescriptorHandleForHeapStart(), outputUavIndex, descriptorSize);
+    cmdList->SetComputeRootDescriptorTable(1, input);
+    cmdList->SetComputeRootDescriptorTable(2, output);
+}
+
+void RenderingSystem::BeginParticlePass(ID3D12GraphicsCommandList* cmdList, GBuffer* gbuffer,
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv, ID3D12DescriptorHeap* srvHeap,
+    UINT particleSrvIndex, UINT descriptorSize,
+    D3D12_GPU_VIRTUAL_ADDRESS particleRenderCb)
+{
+    cmdList->SetPipelineState(mParticlePSO.Get());
+    cmdList->SetGraphicsRootSignature(mParticleRootSignature.Get());
+    cmdList->SetGraphicsRootConstantBufferView(0, particleRenderCb);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE particles(
+        srvHeap->GetGPUDescriptorHandleForHeapStart(), particleSrvIndex, descriptorSize);
+    cmdList->SetGraphicsRootDescriptorTable(1, particles);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[GBuffer::BufferCount] =
+    {
+        gbuffer->Rtv(0), gbuffer->Rtv(1), gbuffer->Rtv(2)
+    };
+    cmdList->OMSetRenderTargets(GBuffer::BufferCount, rtvs, false, &dsv);
 }
 
 void RenderingSystem::BeginShadowPass(ID3D12GraphicsCommandList* cmdList,
@@ -208,6 +245,40 @@ void RenderingSystem::BuildShadowRootSignature(ID3D12Device* device)
         serialized->GetBufferSize(), IID_PPV_ARGS(&mShadowRootSignature)));
 }
 
+void RenderingSystem::BuildParticleRootSignatures(ID3D12Device* device)
+{
+    CD3DX12_DESCRIPTOR_RANGE inputUavRange;
+    inputUavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE outputUavRange;
+    outputUavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1);
+    CD3DX12_ROOT_PARAMETER computeParams[3];
+    computeParams[0].InitAsConstantBufferView(4);
+    computeParams[1].InitAsDescriptorTable(1, &inputUavRange);
+    computeParams[2].InitAsDescriptorTable(1, &outputUavRange);
+    CD3DX12_ROOT_SIGNATURE_DESC computeDesc(3, computeParams, 0, nullptr,
+        D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    ComPtr<ID3DBlob> serialized, errors;
+    ThrowIfFailedRS(D3D12SerializeRootSignature(&computeDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized, &errors));
+    ThrowIfFailedRS(device->CreateRootSignature(0, serialized->GetBufferPointer(),
+        serialized->GetBufferSize(), IID_PPV_ARGS(&mParticleComputeRootSignature)));
+
+    CD3DX12_DESCRIPTOR_RANGE particleSrvRange;
+    particleSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
+    CD3DX12_ROOT_PARAMETER particleParams[2];
+    particleParams[0].InitAsConstantBufferView(3);
+    particleParams[1].InitAsDescriptorTable(1, &particleSrvRange,
+        D3D12_SHADER_VISIBILITY_VERTEX);
+    CD3DX12_ROOT_SIGNATURE_DESC particleDesc(2, particleParams, 0, nullptr,
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    serialized.Reset();
+    errors.Reset();
+    ThrowIfFailedRS(D3D12SerializeRootSignature(&particleDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized, &errors));
+    ThrowIfFailedRS(device->CreateRootSignature(0, serialized->GetBufferPointer(),
+        serialized->GetBufferSize(), IID_PPV_ARGS(&mParticleRootSignature)));
+}
+
 void RenderingSystem::BuildShaders()
 {
     mGeometryVS = CompileShader(L"shader.hlsl", "GeometryVS", "vs_5_0");
@@ -219,6 +290,10 @@ void RenderingSystem::BuildShaders()
     mLightingVS = CompileShader(L"shader.hlsl", "LightingVS", "vs_5_0");
     mLightingPS = CompileShader(L"shader.hlsl", "LightingPS", "ps_5_0");
     mShadowVS = CompileShader(L"shader.hlsl", "ShadowVS", "vs_5_0");
+    mParticleCS = CompileShader(L"shader.hlsl", "ParticleCS", "cs_5_0");
+    mParticleVS = CompileShader(L"shader.hlsl", "ParticleVS", "vs_5_0");
+    mParticleGS = CompileShader(L"shader.hlsl", "ParticleGS", "gs_5_0");
+    mParticlePS = CompileShader(L"shader.hlsl", "ParticlePS", "ps_5_0");
 }
 
 void RenderingSystem::BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
@@ -309,4 +384,31 @@ void RenderingSystem::BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferForm
     shadow.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     shadow.SampleDesc = { 1, 0 };
     ThrowIfFailedRS(device->CreateGraphicsPipelineState(&shadow, IID_PPV_ARGS(&mShadowPSO)));
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC particleCompute = {};
+    particleCompute.pRootSignature = mParticleComputeRootSignature.Get();
+    particleCompute.CS = { mParticleCS->GetBufferPointer(), mParticleCS->GetBufferSize() };
+    ThrowIfFailedRS(device->CreateComputePipelineState(&particleCompute,
+        IID_PPV_ARGS(&mParticleComputePSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC particle = {};
+    particle.InputLayout = { nullptr, 0 };
+    particle.pRootSignature = mParticleRootSignature.Get();
+    particle.VS = { mParticleVS->GetBufferPointer(), mParticleVS->GetBufferSize() };
+    particle.GS = { mParticleGS->GetBufferPointer(), mParticleGS->GetBufferSize() };
+    particle.PS = { mParticlePS->GetBufferPointer(), mParticlePS->GetBufferSize() };
+    particle.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    particle.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    particle.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    particle.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    particle.SampleMask = UINT_MAX;
+    particle.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    particle.NumRenderTargets = GBuffer::BufferCount;
+    particle.RTVFormats[0] = gbuffer->Format(0);
+    particle.RTVFormats[1] = gbuffer->Format(1);
+    particle.RTVFormats[2] = gbuffer->Format(2);
+    particle.DSVFormat = depthStencilFormat;
+    particle.SampleDesc = { 1, 0 };
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(&particle,
+        IID_PPV_ARGS(&mParticlePSO)));
 }

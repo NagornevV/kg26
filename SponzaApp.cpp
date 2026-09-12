@@ -86,6 +86,18 @@ SponzaApp::~SponzaApp()
         mShadowConstantBuffer->Unmap(0, nullptr);
         mShadowCbMappedData = nullptr;
     }
+
+    if (mParticleComputeCbMappedData)
+    {
+        mParticleComputeConstantBuffer->Unmap(0, nullptr);
+        mParticleComputeCbMappedData = nullptr;
+    }
+
+    if (mParticleRenderCbMappedData)
+    {
+        mParticleRenderConstantBuffer->Unmap(0, nullptr);
+        mParticleRenderCbMappedData = nullptr;
+    }
 }
 
 // =============================================================
@@ -101,6 +113,7 @@ bool SponzaApp::Initialize()
     BuildConstantBuffer();
     BuildTessellationConstantBuffer();
     BuildShadowConstantBuffer();
+    BuildParticleConstantBuffers();
     BuildShadersAndInputLayout();
 
     // GBuffer создаётся до PSO, потому что форматы MRT нужны при создании pipeline state.
@@ -109,6 +122,7 @@ bool SponzaApp::Initialize()
 
     BuildRenderingSystem();
     BuildShadowResources();
+    BuildParticleResources();
     CreateWhiteTexture();
     LoadTessellationTextures();
     LoadModel("sponza/sponza.obj");
@@ -130,6 +144,8 @@ bool SponzaApp::Initialize()
     mCubeVertexUpload.Reset();
     mCubeIndexUpload.Reset();
     mTextureUploads.clear();
+    mParticleInitialUpload.Reset();
+    mParticleCounterUpload.Reset();
 
     return true;
 }
@@ -157,6 +173,8 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
         mFrustumCullingEnabled = !mFrustumCullingEnabled;
     else if (key == 'O')
         mOctreeCullingEnabled = !mOctreeCullingEnabled;
+    else if (key == 'P')
+        mParticlesEnabled = !mParticlesEnabled;
 
     UpdateWindowCaption();
     SetWindowText(mhMainWnd, mMainWndCaption.c_str());
@@ -296,6 +314,25 @@ void SponzaApp::Update(const GameTimer& gt)
     mLights.CascadeSplits = mCascadeSplits;
     mRenderingSystem.UpdateLights(md3dDevice.Get(), mSrvHeap.Get(),
         kLightCbvIndex, mCbvSrvUavDescriptorSize, mLights);
+
+    CBParticleCompute particleCompute = {};
+    particleCompute.DeltaTime = (std::min)(gt.DeltaTime(), 1.0f / 30.0f);
+    particleCompute.TotalTime = gt.TotalTime();
+    particleCompute.EmitterPosition = { 0.f, 45.f, 0.f };
+    memcpy(mParticleComputeCbMappedData, &particleCompute, sizeof(particleCompute));
+
+    XMVECTOR cameraForward = XMVector3Normalize(XMVectorSubtract(
+        XMLoadFloat3(&mCameraTarget), XMLoadFloat3(&mEyePos)));
+    const XMVECTOR worldUp = XMVectorSet(0.f, 1.f, 0.f, 0.f);
+    XMVECTOR cameraRight = XMVector3Normalize(XMVector3Cross(worldUp, cameraForward));
+    XMVECTOR cameraUp = XMVector3Normalize(XMVector3Cross(cameraForward, cameraRight));
+    CBParticleRender particleRender = {};
+    XMStoreFloat4x4(&particleRender.ViewProj, XMMatrixTranspose(view * proj));
+    XMStoreFloat3(&particleRender.CameraRight, cameraRight);
+    XMStoreFloat3(&particleRender.CameraUp, cameraUp);
+    particleRender.EyePosition = mEyePos;
+    particleRender.ParticleSize = 15.f;
+    memcpy(mParticleRenderCbMappedData, &particleRender, sizeof(particleRender));
     UpdateWindowCaption();
 }
 
@@ -387,6 +424,10 @@ void SponzaApp::Draw(const GameTimer& gt)
     mCommandList->IASetVertexBuffers(0, 1, &mTessellationVbView);
     mCommandList->IASetIndexBuffer(nullptr);
     mCommandList->DrawInstanced(4, 1, 0, 0);
+
+    // ---------- Particle pass: compute update + geometry-shader billboards ----------
+    if (mParticlesEnabled)
+        DrawParticles();
 
     // ---------- 2. Lighting pass: читаем GBuffer и выводим свет на экран ----------
     mGBuffer.TransitionToShaderResources(mCommandList.Get());
@@ -493,6 +534,126 @@ void SponzaApp::BuildShadowConstantBuffer()
         IID_PPV_ARGS(&mShadowConstantBuffer)));
     ThrowIfFailed(mShadowConstantBuffer->Map(0, nullptr,
         reinterpret_cast<void**>(&mShadowCbMappedData)));
+}
+
+void SponzaApp::BuildParticleConstantBuffers()
+{
+    const UINT computeCbSize = (sizeof(CBParticleCompute) + 255) & ~255;
+    const UINT renderCbSize = (sizeof(CBParticleRender) + 255) & ~255;
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+
+    auto computeDesc = CD3DX12_RESOURCE_DESC::Buffer(computeCbSize);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &computeDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&mParticleComputeConstantBuffer)));
+    ThrowIfFailed(mParticleComputeConstantBuffer->Map(0, nullptr,
+        reinterpret_cast<void**>(&mParticleComputeCbMappedData)));
+
+    auto renderDesc = CD3DX12_RESOURCE_DESC::Buffer(renderCbSize);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &renderDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&mParticleRenderConstantBuffer)));
+    ThrowIfFailed(mParticleRenderConstantBuffer->Map(0, nullptr,
+        reinterpret_cast<void**>(&mParticleRenderCbMappedData)));
+}
+
+void SponzaApp::BuildParticleResources()
+{
+    // Buffer 0 starts full.  In ParticleCS it is consumed into buffer 1;
+    // on the next frame their roles swap.  Each UAV has its own append/consume counter.
+    const UINT particleBytes = kParticleCount * sizeof(ParticleGpu);
+    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    auto particleDesc = CD3DX12_RESOURCE_DESC::Buffer(particleBytes,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    auto counterDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(UINT),
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+        &particleDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+        IID_PPV_ARGS(&mParticleBuffers[0])));
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+        &particleDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+        IID_PPV_ARGS(&mParticleBuffers[1])));
+    for (UINT i = 0; i < 2; ++i)
+    {
+        ThrowIfFailed(md3dDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+            &counterDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&mParticleCounters[i])));
+    }
+
+    std::array<ParticleGpu, kParticleCount> particles = {};
+    for (UINT i = 0; i < kParticleCount; ++i)
+    {
+        const float seed = static_cast<float>((i * 47) % 101) / 101.0f;
+        const float angle = seed * XM_2PI;
+        particles[i].Position = { cosf(angle) * (4.f + 16.f * seed),
+            45.f + 120.f * seed, sinf(angle) * (4.f + 16.f * seed) };
+        particles[i].Velocity = { cosf(angle) * (22.f + 45.f * seed),
+            85.f + 90.f * seed, sinf(angle) * (22.f + 45.f * seed) };
+        particles[i].Age = seed * 3.5f;
+        particles[i].Lifetime = 3.5f + seed * 1.5f;
+    }
+
+    auto uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(particleBytes);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &uploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&mParticleInitialUpload)));
+    void* mapped = nullptr;
+    ThrowIfFailed(mParticleInitialUpload->Map(0, nullptr, &mapped));
+    memcpy(mapped, particles.data(), particleBytes);
+    mParticleInitialUpload->Unmap(0, nullptr);
+    mCommandList->CopyBufferRegion(mParticleBuffers[0].Get(), 0,
+        mParticleInitialUpload.Get(), 0, particleBytes);
+
+    auto counterUploadDesc = CD3DX12_RESOURCE_DESC::Buffer(2 * sizeof(UINT));
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &counterUploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&mParticleCounterUpload)));
+    const UINT counters[2] = { kParticleCount, 0 };
+    mapped = nullptr;
+    ThrowIfFailed(mParticleCounterUpload->Map(0, nullptr, &mapped));
+    memcpy(mapped, counters, sizeof(counters));
+    mParticleCounterUpload->Unmap(0, nullptr);
+    for (UINT i = 0; i < 2; ++i)
+        mCommandList->CopyBufferRegion(mParticleCounters[i].Get(), 0,
+            mParticleCounterUpload.Get(), i * sizeof(UINT), sizeof(UINT));
+
+    auto particleReady = CD3DX12_RESOURCE_BARRIER::Transition(mParticleBuffers[0].Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    mCommandList->ResourceBarrier(1, &particleReady);
+    D3D12_RESOURCE_BARRIER counterReady[2] =
+    {
+        CD3DX12_RESOURCE_BARRIER::Transition(mParticleCounters[0].Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+        CD3DX12_RESOURCE_BARRIER::Transition(mParticleCounters[1].Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    };
+    mCommandList->ResourceBarrier(2, counterReady);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.Buffer.NumElements = kParticleCount;
+    srvDesc.Buffer.StructureByteStride = sizeof(ParticleGpu);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+    uavDesc.Buffer.NumElements = kParticleCount;
+    uavDesc.Buffer.StructureByteStride = sizeof(ParticleGpu);
+    uavDesc.Buffer.CounterOffsetInBytes = 0;
+    for (UINT i = 0; i < 2; ++i)
+    {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE srv(mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            kParticleBufferSrvStart + i, mCbvSrvUavDescriptorSize);
+        CD3DX12_CPU_DESCRIPTOR_HANDLE uav(mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            kParticleBufferUavStart + i, mCbvSrvUavDescriptorSize);
+        md3dDevice->CreateShaderResourceView(mParticleBuffers[i].Get(), &srvDesc, srv);
+        md3dDevice->CreateUnorderedAccessView(mParticleBuffers[i].Get(),
+            mParticleCounters[i].Get(), &uavDesc, uav);
+    }
 }
 
 void SponzaApp::BuildShadowResources()
@@ -637,6 +798,44 @@ void SponzaApp::DrawShadowMaps()
     auto toRead = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
         D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
     mCommandList->ResourceBarrier(1, &toRead);
+}
+
+void SponzaApp::DrawParticles()
+{
+    const UINT inputBuffer = mParticleCurrentBuffer;
+    const UINT outputBuffer = 1 - inputBuffer;
+
+    // GPU only: every thread consumes one old particle and appends one updated particle.
+    mRenderingSystem.BeginParticleCompute(mCommandList.Get(), mSrvHeap.Get(),
+        kParticleBufferUavStart + inputBuffer, kParticleBufferUavStart + outputBuffer,
+        mCbvSrvUavDescriptorSize,
+        mParticleComputeConstantBuffer->GetGPUVirtualAddress());
+    mCommandList->Dispatch(kParticleCount / kParticleThreadsPerGroup, 1, 1);
+
+    D3D12_RESOURCE_BARRIER uavBarriers[2] =
+    {
+        CD3DX12_RESOURCE_BARRIER::UAV(mParticleBuffers[inputBuffer].Get()),
+        CD3DX12_RESOURCE_BARRIER::UAV(mParticleBuffers[outputBuffer].Get())
+    };
+    mCommandList->ResourceBarrier(2, uavBarriers);
+
+    mParticleCurrentBuffer = outputBuffer;
+    auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(mParticleBuffers[mParticleCurrentBuffer].Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    mCommandList->ResourceBarrier(1, &toSrv);
+
+    mRenderingSystem.BeginParticlePass(mCommandList.Get(), &mGBuffer, DepthStencilView(),
+        mSrvHeap.Get(), kParticleBufferSrvStart + mParticleCurrentBuffer,
+        mCbvSrvUavDescriptorSize,
+        mParticleRenderConstantBuffer->GetGPUVirtualAddress());
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+    mCommandList->IASetVertexBuffers(0, 0, nullptr);
+    mCommandList->IASetIndexBuffer(nullptr);
+    mCommandList->DrawInstanced(kParticleCount, 1, 0, 0);
+
+    auto toUav = CD3DX12_RESOURCE_BARRIER::Transition(mParticleBuffers[mParticleCurrentBuffer].Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    mCommandList->ResourceBarrier(1, &toUav);
 }
 
 // =============================================================
@@ -1194,6 +1393,7 @@ void SponzaApp::UpdateWindowCaption()
     mMainWndCaption = L"Sponza - WASD: move | LMB: shoot | RMB: orbit | F: wireframe"
         L" | C: culling " + std::wstring(mFrustumCullingEnabled ? L"ON" : L"OFF")
         + L" | O: octree " + std::wstring(mOctreeCullingEnabled ? L"ON" : L"OFF")
+        + L" | P: particles " + std::wstring(mParticlesEnabled ? L"ON" : L"OFF")
         + L" | cubes: " + std::to_wstring(mVisibleObjectCount)
         + L"/" + std::to_wstring(mSceneObjects.size());
 }

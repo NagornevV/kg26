@@ -42,10 +42,33 @@ cbuffer CBShadow : register(b2)
     float4x4 gLightViewProj;
 };
 
+cbuffer CBParticleRender : register(b3)
+{
+    float4x4 gParticleViewProj;
+    float3   gParticleCameraRight; float gParticleSize;
+    float3   gParticleCameraUp;    float gParticlePad0;
+    float3   gParticleEyePos;      float gParticlePad1;
+};
+
+cbuffer CBParticleCompute : register(b4)
+{
+    float    gParticleDeltaTime;
+    float    gParticleTotalTime;
+    float3   gParticleEmitterPosition; float gParticlePad2;
+};
+
 Texture2D    gTexture0   : register(t0);
 Texture2D    gTexture1   : register(t1);
 Texture2D    gTexture2   : register(t2);
 Texture2DArray<float> gShadowMap : register(t3);
+struct ParticleGPU
+{
+    float3 Position; float Age;
+    float3 Velocity; float Lifetime;
+};
+StructuredBuffer<ParticleGPU> gParticles : register(t4);
+ConsumeStructuredBuffer<ParticleGPU> gParticleInput : register(u0);
+AppendStructuredBuffer<ParticleGPU> gParticleOutput : register(u1);
 SamplerState gSampler    : register(s0);
 SamplerComparisonState gShadowSampler : register(s1);
 
@@ -230,6 +253,99 @@ GeoVSOut TessellationDS(
     output.NormalW = normalize(mul(normalL, (float3x3)gWorld));
     output.TexC = texC;
     return output;
+}
+
+float ParticleRandom(float value)
+{
+    return frac(sin(value * 12.9898f) * 43758.5453f);
+}
+
+ParticleGPU SpawnParticle(uint id)
+{
+    ParticleGPU particle;
+    float seed = ParticleRandom((float)id + gParticleTotalTime * 19.0f);
+    float angle = seed * 6.2831853f;
+    float speed = 24.0f + 55.0f * ParticleRandom((float)id + 7.0f);
+    particle.Position = gParticleEmitterPosition;
+    particle.Velocity = float3(cos(angle) * speed, 100.0f + 85.0f * seed,
+        sin(angle) * speed);
+    particle.Age = 0.0f;
+    particle.Lifetime = 3.5f + 1.5f * ParticleRandom((float)id + 23.0f);
+    return particle;
+}
+
+[numthreads(64, 1, 1)]
+void ParticleCS(uint particleId : SV_DispatchThreadID)
+{
+    // Ровно 512 потоков: каждый забирает один элемент из ConsumeStructuredBuffer
+    // и записывает один элемент в AppendStructuredBuffer.
+    ParticleGPU particle = gParticleInput.Consume();
+    float dt = min(gParticleDeltaTime, 1.0f / 30.0f);
+    particle.Age += dt;
+    particle.Velocity.y -= 48.0f * dt;
+    particle.Position += particle.Velocity * dt;
+
+    if (particle.Age >= particle.Lifetime || particle.Position.y < 12.0f)
+        particle = SpawnParticle(particleId);
+
+    gParticleOutput.Append(particle);
+}
+
+struct ParticleVSOut
+{
+    float3 Position : POSITION;
+    float Age : TEXCOORD0;
+    float Lifetime : TEXCOORD1;
+};
+
+ParticleVSOut ParticleVS(uint particleId : SV_VertexID)
+{
+    ParticleGPU particle = gParticles[particleId];
+    ParticleVSOut output;
+    output.Position = particle.Position;
+    output.Age = particle.Age;
+    output.Lifetime = particle.Lifetime;
+    return output;
+}
+
+[maxvertexcount(4)]
+void ParticleGS(point ParticleVSOut input[1], inout TriangleStream<GeoVSOut> stream)
+{
+    float halfSize = gParticleSize * 0.5f;
+    float3 right = gParticleCameraRight * halfSize;
+    float3 up = gParticleCameraUp * halfSize;
+    float3 center = input[0].Position;
+    float age = saturate(input[0].Age / max(input[0].Lifetime, 0.001f));
+    float3 normal = normalize(gParticleEyePos - center);
+    const float3 positions[4] =
+    {
+        center - right - up, center - right + up,
+        center + right - up, center + right + up
+    };
+
+    GeoVSOut output;
+    output.NormalW = normal;
+    output.TexC = float2(age, 0.0f);
+    [unroll]
+    for (uint vertex = 0; vertex < 4; ++vertex)
+    {
+        output.PosW = positions[vertex];
+        output.PosH = mul(float4(positions[vertex], 1.0f), gParticleViewProj);
+        stream.Append(output);
+    }
+    stream.RestartStrip();
+}
+
+GBufferOut ParticlePS(GeoVSOut pin)
+{
+    GBufferOut gout;
+    float life = pin.TexC.x;
+    float3 hot = float3(1.0f, 0.20f, 0.03f);
+    float3 cool = float3(1.0f, 0.85f, 0.12f);
+    gout.Albedo = float4(lerp(hot, cool, life), 1.0f);
+    gout.Normal = float4(normalize(pin.NormalW) * 0.5f + 0.5f, 1.0f);
+    gout.Position = float4(pin.PosW, 1.0f);
+    return gout;
 }
 
 struct LightVSOut

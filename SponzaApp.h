@@ -96,6 +96,29 @@ struct CBShadow
     XMFLOAT4X4 LightViewProj;
 };
 
+// Один элемент двух GPU StructuredBuffer. Эти данные обновляются только в ParticleCS.
+struct ParticleGpu
+{
+    XMFLOAT3 Position; float Age;
+    XMFLOAT3 Velocity; float Lifetime;
+};
+
+struct CBParticleCompute
+{
+    float DeltaTime;
+    float TotalTime;
+    XMFLOAT2 Padding0;
+    XMFLOAT3 EmitterPosition; float Padding1;
+};
+
+struct CBParticleRender
+{
+    XMFLOAT4X4 ViewProj;
+    XMFLOAT3 CameraRight; float ParticleSize;
+    XMFLOAT3 CameraUp;    float Padding0;
+    XMFLOAT3 EyePosition; float Padding1;
+};
+
 class SponzaApp : public D3DApp
 {
 public:
@@ -123,6 +146,8 @@ private:
     void BuildTessellationConstantBuffer();
     void BuildShadowResources();
     void BuildShadowConstantBuffer();
+    void BuildParticleConstantBuffers();
+    void BuildParticleResources();
     void BuildShadersAndInputLayout();
     void BuildGeometry();
     void BuildTessellatedSurface();
@@ -144,6 +169,7 @@ private:
     void UpdateWindowCaption();
     void UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj);
     void DrawShadowMaps();
+    void DrawParticles();
     bool IntersectsFrustum(const BoundingBox& box,
         const std::array<FrustumPlane, 6>& planes) const;
     std::array<FrustumPlane, 6> ExtractFrustumPlanes(const XMMATRIX& viewProj) const;
@@ -170,9 +196,13 @@ private:
     static const int kTessellationDisplacementIndex = kTessellationNormalIndex + 1;
     static const int kTessellationCbvIndex = kTessellationDisplacementIndex + 1;
     static const int kShadowMapSrvIndex = kTessellationCbvIndex + 1;
-    static const int kTotalSrvSlots = kShadowMapSrvIndex + 1;
+    static const int kParticleBufferSrvStart = kShadowMapSrvIndex + 1;
+    static const int kParticleBufferUavStart = kParticleBufferSrvStart + 2;
+    static const int kTotalSrvSlots = kParticleBufferUavStart + 2;
     static const UINT kCascadeCount = 3;
     static const UINT kShadowMapSize = 2048;
+    static const UINT kParticleCount = 512;
+    static const UINT kParticleThreadsPerGroup = 64;
 
     ComPtr<ID3D12DescriptorHeap> mSrvHeap;
 
@@ -224,6 +254,16 @@ private:
     std::array<XMFLOAT4X4, kCascadeCount> mCascadeLightViewProj = {};
     XMFLOAT4 mCascadeSplits = {};
 
+    std::array<ComPtr<ID3D12Resource>, 2> mParticleBuffers;
+    std::array<ComPtr<ID3D12Resource>, 2> mParticleCounters;
+    ComPtr<ID3D12Resource> mParticleInitialUpload;
+    ComPtr<ID3D12Resource> mParticleCounterUpload;
+    ComPtr<ID3D12Resource> mParticleComputeConstantBuffer;
+    ComPtr<ID3D12Resource> mParticleRenderConstantBuffer;
+    BYTE* mParticleComputeCbMappedData = nullptr;
+    BYTE* mParticleRenderCbMappedData = nullptr;
+    UINT mParticleCurrentBuffer = 0;
+
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInstancedInputLayout;
     GBuffer mGBuffer;
@@ -236,6 +276,7 @@ private:
     bool mWireframe = false;
     bool mFrustumCullingEnabled = true;
     bool mOctreeCullingEnabled = true;
+    bool mParticlesEnabled = true;
 
     // Камера
     float    mYaw = 0.f;

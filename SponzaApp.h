@@ -170,6 +170,9 @@ private:
     void UpdateCascades(const XMMATRIX& view, const XMMATRIX& proj);
     void DrawShadowMaps();
     void DrawParticles();
+    void BuildCullingObserver();
+    void UpdateCullingObserver(const XMMATRIX& mainViewProj);
+    void DrawCullingObserver();
     bool IntersectsFrustum(const BoundingBox& box,
         const std::array<FrustumPlane, 6>& planes) const;
     std::array<FrustumPlane, 6> ExtractFrustumPlanes(const XMMATRIX& viewProj) const;
@@ -279,6 +282,17 @@ private:
     bool mParticlesEnabled = true;
     bool mGammaCorrectionEnabled = true;
     bool mVignetteEnabled = true;
+    // Independent top-down observer. Only the main camera determines the visible instance list.
+    bool mObserverVisible = true;
+    float mObserverHalfExtent = 5500.f;
+    D3D12_VIEWPORT mObserverViewport = {};
+    D3D12_RECT mObserverScissor = {};
+    ComPtr<ID3D12Resource> mObserverAllInstances;
+    D3D12_VERTEX_BUFFER_VIEW mObserverAllInstancesView = {};
+    ComPtr<ID3D12Resource> mObserverLines;
+    BYTE* mObserverLinesMapped = nullptr;
+    D3D12_VERTEX_BUFFER_VIEW mObserverLinesView = {};
+    XMFLOAT4X4 mObserverViewProj = {};
 
     // Камера
     float    mYaw = 0.f;

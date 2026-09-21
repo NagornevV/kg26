@@ -37,6 +37,7 @@ void RenderingSystem::Initialize(ID3D12Device* device,
     BuildShaders();
     BuildPSOs(device, backBufferFormat, depthStencilFormat, inputLayout,
         instancedInputLayout, gbuffer);
+    BuildObserverPipeline(device, backBufferFormat, inputLayout, instancedInputLayout);
 
     UINT cbSize = (sizeof(CBFrameLights) + 255) & ~255;
     CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
@@ -155,6 +156,65 @@ void RenderingSystem::BeginLightingPass(ID3D12GraphicsCommandList* cmdList,
 
     cmdList->SetGraphicsRootDescriptorTable(0, gbuf);
     cmdList->SetGraphicsRootDescriptorTable(1, lightCbv);
+}
+
+void RenderingSystem::BeginObserverPass(ID3D12GraphicsCommandList* cmdList,
+    ObserverPass pass, const XMFLOAT4X4& viewProj, const XMFLOAT4& color)
+{
+    cmdList->SetGraphicsRootSignature(mObserverRootSignature.Get());
+    auto* pso = pass == ObserverPass::Instances ? mObserverInstancesPSO.Get()
+        : (pass == ObserverPass::Lines ? mObserverLinesPSO.Get() : mObserverScenePSO.Get());
+    cmdList->SetPipelineState(pso);
+    cmdList->SetGraphicsRoot32BitConstants(0, 16, &viewProj, 0);
+    cmdList->SetGraphicsRoot32BitConstants(0, 4, &color, 16);
+}
+
+void RenderingSystem::BuildObserverPipeline(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
+    const std::vector<D3D12_INPUT_ELEMENT_DESC>& inputLayout,
+    const std::vector<D3D12_INPUT_ELEMENT_DESC>& instancedInputLayout)
+{
+    CD3DX12_ROOT_PARAMETER parameter;
+    parameter.InitAsConstants(20, 5);
+    CD3DX12_ROOT_SIGNATURE_DESC desc(1, &parameter, 0, nullptr,
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    ComPtr<ID3DBlob> serialized, errors;
+    ThrowIfFailedRS(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,
+        &serialized, &errors));
+    ThrowIfFailedRS(device->CreateRootSignature(0, serialized->GetBufferPointer(),
+        serialized->GetBufferSize(), IID_PPV_ARGS(&mObserverRootSignature)));
+
+    const auto vs = CompileShader(L"shader.hlsl", "ObserverVS", "vs_5_0");
+    const auto instancesVs = CompileShader(L"shader.hlsl", "ObserverInstancesVS", "vs_5_0");
+    const auto ps = CompileShader(L"shader.hlsl", "ObserverPS", "ps_5_0");
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline = {};
+    pipeline.pRootSignature = mObserverRootSignature.Get();
+    pipeline.InputLayout = { inputLayout.data(), static_cast<UINT>(inputLayout.size()) };
+    pipeline.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pipeline.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pipeline.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pipeline.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pipeline.RasterizerState.DepthClipEnable = false;
+    pipeline.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pipeline.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+
+    pipeline.DepthStencilState.DepthEnable = false;
+    pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pipeline.SampleMask = UINT_MAX;
+    pipeline.NumRenderTargets = 1;
+    pipeline.RTVFormats[0] = backBufferFormat;
+    pipeline.SampleDesc = { 1, 0 };
+    pipeline.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&mObserverScenePSO)));
+
+    pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipeline.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&mObserverLinesPSO)));
+
+    pipeline.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline.InputLayout = { instancedInputLayout.data(), static_cast<UINT>(instancedInputLayout.size()) };
+    pipeline.VS = { instancesVs->GetBufferPointer(), instancesVs->GetBufferSize() };
+    ThrowIfFailedRS(device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&mObserverInstancesPSO)));
 }
 
 void RenderingSystem::BuildGeometryRootSignature(ID3D12Device* device)

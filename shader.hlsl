@@ -424,6 +424,29 @@ float CalcShadow(float3 posW, float3 normalW)
     return visibility / 9.0f;
 }
 
+// Independent observer camera. Culling still uses the primary camera on the CPU.
+cbuffer CBObserver : register(b5)
+{
+    float4x4 gObserverViewProj;
+    float4 gObserverColor;
+};
+
+float4 ObserverVS(VSIn input) : SV_POSITION
+{
+    return mul(float4(input.PosL, 1.0f), gObserverViewProj);
+}
+
+float4 ObserverInstancesVS(InstancedVSIn input) : SV_POSITION
+{
+    float3 positionW = input.PosL * input.PositionScale.w + input.PositionScale.xyz;
+    return mul(float4(positionW, 1.0f), gObserverViewProj);
+}
+
+float4 ObserverPS() : SV_Target
+{
+    return gObserverColor;
+}
+
 float4 LightingPS(LightVSOut pin) : SV_Target
 {
     float3 albedo = gTexture0.Sample(gSampler, pin.TexC).rgb;

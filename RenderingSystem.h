@@ -43,6 +43,9 @@ struct CBFrameLights
 class RenderingSystem
 {
 public:
+    enum class ObserverPass { Scene, Instances, Lines };
+    void BeginObserverPass(ID3D12GraphicsCommandList* cmdList, ObserverPass pass,
+        const XMFLOAT4X4& viewProj, const XMFLOAT4& color);
     void Initialize(ID3D12Device* device,
         DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat,
@@ -85,6 +88,9 @@ private:
     void BuildShadowRootSignature(ID3D12Device* device);
     void BuildParticleRootSignatures(ID3D12Device* device);
     void BuildShaders();
+    void BuildObserverPipeline(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
+        const std::vector<D3D12_INPUT_ELEMENT_DESC>& inputLayout,
+        const std::vector<D3D12_INPUT_ELEMENT_DESC>& instancedInputLayout);
     void BuildPSOs(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat,
         const std::vector<D3D12_INPUT_ELEMENT_DESC>& inputLayout,
@@ -97,6 +103,10 @@ private:
     ComPtr<ID3D12RootSignature> mShadowRootSignature;
     ComPtr<ID3D12RootSignature> mParticleComputeRootSignature;
     ComPtr<ID3D12RootSignature> mParticleRootSignature;
+    ComPtr<ID3D12RootSignature> mObserverRootSignature;
+    ComPtr<ID3D12PipelineState> mObserverScenePSO;
+    ComPtr<ID3D12PipelineState> mObserverInstancesPSO;
+    ComPtr<ID3D12PipelineState> mObserverLinesPSO;
 
     ComPtr<ID3DBlob> mGeometryVS;
     ComPtr<ID3DBlob> mInstancedGeometryVS;

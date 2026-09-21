@@ -63,6 +63,9 @@ SponzaApp::~SponzaApp()
     if (md3dDevice != nullptr)
         FlushCommandQueue();
 
+    if (mObserverLinesMapped)
+        mObserverLines->Unmap(0, nullptr);
+
     if (mCbMappedData)
     {
         mConstantBuffer->Unmap(0, nullptr);
@@ -147,6 +150,8 @@ bool SponzaApp::Initialize()
     mParticleInitialUpload.Reset();
     mParticleCounterUpload.Reset();
 
+    BuildCullingObserver();
+
     return true;
 }
 
@@ -179,6 +184,8 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
         mGammaCorrectionEnabled = !mGammaCorrectionEnabled;
     else if (key == 'V')
         mVignetteEnabled = !mVignetteEnabled;
+    else if (key == 'T')
+        mObserverVisible = !mObserverVisible;
 
     UpdateWindowCaption();
     SetWindowText(mhMainWnd, mMainWndCaption.c_str());
@@ -186,6 +193,9 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
 
 void SponzaApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
+    if (mObserverVisible && PtInRect(&mObserverScissor, POINT{ x, y }))
+        return;
+
     if (btnState & MK_LBUTTON)
         ShootLight();
 
@@ -224,6 +234,14 @@ void SponzaApp::OnMouseMove(WPARAM btnState, int x, int y)
 
 void SponzaApp::OnMouseWheel(short delta)
 {
+    POINT cursor;
+    if (mObserverVisible && GetCursorPos(&cursor) && ScreenToClient(mhMainWnd, &cursor)
+        && PtInRect(&mObserverScissor, cursor))
+    {
+        mObserverHalfExtent = std::clamp(mObserverHalfExtent * powf(0.85f, delta / 120.f),
+            2000.f, 20000.f);
+        return;
+    }
     mRadius -= delta * mZoomSpeed * 0.01f;
     mRadius = std::clamp(mRadius, 100.f, 3000.f);
 }
@@ -291,6 +309,8 @@ void SponzaApp::Update(const GameTimer& gt)
     UpdateShotLights(gt.DeltaTime());
     UpdateCascades(view, proj);
     UpdateVisibleInstances(view * proj);
+    if (mObserverVisible)
+        UpdateCullingObserver(view * proj);
 
     CBPerObject cb = {};
     XMStoreFloat4x4(&cb.World, XMMatrixTranspose(world));
@@ -454,11 +474,14 @@ void SponzaApp::Draw(const GameTimer& gt)
         mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
         kShadowMapSrvIndex, mCbvSrvUavDescriptorSize);
     mCommandList->SetGraphicsRootDescriptorTable(2, shadowMapSrv);
-    // Full-screen quad is generated in LightingVS from SV_VertexID, no vertex buffer.
+
     mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     mCommandList->IASetVertexBuffers(0, 0, nullptr);
     mCommandList->IASetIndexBuffer(nullptr);
     mCommandList->DrawInstanced(4, 1, 0, 0);
+
+    if (mObserverVisible)
+        DrawCullingObserver();
 
     auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(), D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -474,7 +497,109 @@ void SponzaApp::Draw(const GameTimer& gt)
     FlushCommandQueue();
 }
 
-// =============================================================
+void SponzaApp::BuildCullingObserver()
+{
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    auto instancesDesc = CD3DX12_RESOURCE_DESC::Buffer(mSceneObjects.size() * sizeof(InstanceData));
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &instancesDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mObserverAllInstances)));
+    InstanceData* instances = nullptr;
+    D3D12_RANGE noCpuReads = { 0, 0 };
+    ThrowIfFailed(mObserverAllInstances->Map(0, &noCpuReads, reinterpret_cast<void**>(&instances)));
+    for (size_t i = 0; i < mSceneObjects.size(); ++i)
+    {
+        const auto& object = mSceneObjects[i];
+        instances[i].PositionScale = { object.Position.x, object.Position.y, object.Position.z, object.Scale };
+    }
+    mObserverAllInstances->Unmap(0, nullptr);
+    mObserverAllInstancesView = { mObserverAllInstances->GetGPUVirtualAddress(),
+        static_cast<UINT>(instancesDesc.Width), sizeof(InstanceData) };
+
+    auto linesDesc = CD3DX12_RESOURCE_DESC::Buffer(4 * sizeof(Vertex));
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &linesDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mObserverLines)));
+    ThrowIfFailed(mObserverLines->Map(0, &noCpuReads, reinterpret_cast<void**>(&mObserverLinesMapped)));
+    mObserverLinesView = { mObserverLines->GetGPUVirtualAddress(),
+        static_cast<UINT>(linesDesc.Width), sizeof(Vertex) };
+}
+
+void SponzaApp::UpdateCullingObserver(const XMMATRIX& mainViewProj)
+{
+
+    const int size = (std::max)(1, (std::min)({ 420, mClientWidth * 3 / 8, mClientHeight / 2 }));
+    const int margin = (std::max)(0, (std::min)({ 12, (mClientWidth - size) / 2, (mClientHeight - size) / 2 }));
+    const int left = mClientWidth - size - margin;
+    mObserverScissor = { left, margin, left + size, margin + size };
+    mObserverViewport = { static_cast<float>(left), static_cast<float>(margin),
+        static_cast<float>(size), static_cast<float>(size), 0.f, 1.f };
+
+    const XMMATRIX observerView = XMMatrixLookAtLH(XMVectorSet(0.f, 18000.f, 0.f, 1.f),
+        XMVectorZero(), XMVectorSet(0.f, 0.f, 1.f, 0.f));
+    const float aspect = mObserverViewport.Width / mObserverViewport.Height;
+    const XMMATRIX observerProjection = XMMatrixOrthographicLH(2.f * mObserverHalfExtent * aspect,
+        2.f * mObserverHalfExtent, 1.f, 50000.f);
+    XMStoreFloat4x4(&mObserverViewProj, XMMatrixTranspose(observerView * observerProjection));
+
+    const XMMATRIX inverse = XMMatrixInverse(nullptr, mainViewProj);
+    Vertex lines[4] = {};
+    for (int i = 0; i < 2; ++i)
+    {
+        lines[i * 2].Pos = mEyePos;
+        const XMVECTOR edge = XMVectorSet(i == 0 ? -1.f : 1.f, 0.f, 1.f, 1.f);
+        XMStoreFloat3(&lines[i * 2 + 1].Pos, XMVector3TransformCoord(edge, inverse));
+    }
+    memcpy(mObserverLinesMapped, lines, sizeof(lines));
+}
+
+void SponzaApp::DrawCullingObserver()
+{
+    const auto rtv = CurrentBackBufferView();
+    const float background[] = { 0.025f, 0.035f, 0.05f, 1.f };
+    const float borderColor[] = { 0.25f, 0.3f, 0.35f, 1.f };
+    const D3D12_RECT border = {
+        (std::max)(0L, mObserverScissor.left - 2), (std::max)(0L, mObserverScissor.top - 2),
+        (std::min)(static_cast<LONG>(mClientWidth), mObserverScissor.right + 2),
+        (std::min)(static_cast<LONG>(mClientHeight), mObserverScissor.bottom + 2) };
+    mCommandList->ClearRenderTargetView(rtv, borderColor, 1, &border);
+    mCommandList->ClearRenderTargetView(rtv, background, 1, &mObserverScissor);
+    mCommandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    mCommandList->RSSetViewports(1, &mObserverViewport);
+    mCommandList->RSSetScissorRects(1, &mObserverScissor);
+
+    using Pass = RenderingSystem::ObserverPass;
+    mRenderingSystem.BeginObserverPass(mCommandList.Get(), Pass::Scene, mObserverViewProj,
+        { 0.13f, 0.18f, 0.22f, 1.f });
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    mCommandList->IASetVertexBuffers(0, 1, &mVbView);
+    mCommandList->IASetIndexBuffer(&mIbView);
+    for (const auto& submesh : mSubMeshes)
+        mCommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexStart, 0, 0);
+
+    mRenderingSystem.BeginObserverPass(mCommandList.Get(), Pass::Instances, mObserverViewProj,
+        { 0.32f, 0.36f, 0.4f, 1.f });
+    D3D12_VERTEX_BUFFER_VIEW views[] = { mCubeVbView, mObserverAllInstancesView };
+    mCommandList->IASetVertexBuffers(0, 2, views);
+    mCommandList->IASetIndexBuffer(&mCubeIbView);
+    mCommandList->DrawIndexedInstanced(36, static_cast<UINT>(mSceneObjects.size()), 0, 0, 0);
+    if (mVisibleObjectCount > 0)
+    {
+        mRenderingSystem.BeginObserverPass(mCommandList.Get(), Pass::Instances, mObserverViewProj,
+            { 0.05f, 0.9f, 1.f, 1.f });
+        views[1] = mInstanceVbView;
+        mCommandList->IASetVertexBuffers(0, 2, views);
+        mCommandList->DrawIndexedInstanced(36, mVisibleObjectCount, 0, 0, 0);
+    }
+
+    mRenderingSystem.BeginObserverPass(mCommandList.Get(), Pass::Lines, mObserverViewProj,
+        { 1.f, 0.85f, 0.15f, 1.f });
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    mCommandList->IASetVertexBuffers(0, 1, &mObserverLinesView);
+    mCommandList->IASetIndexBuffer(nullptr);
+    mCommandList->DrawInstanced(4, 1, 0, 0);
+    mCommandList->RSSetViewports(1, &mScreenViewport);
+    mCommandList->RSSetScissorRects(1, &mScissorRect);
+}
+
 void SponzaApp::BuildDescriptorHeap()
 {
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
@@ -485,7 +610,6 @@ void SponzaApp::BuildDescriptorHeap()
         &heapDesc, IID_PPV_ARGS(&mSrvHeap)));
 }
 
-// =============================================================
 void SponzaApp::BuildConstantBuffer()
 {
     UINT cbSize = (sizeof(CBPerObject) + 255) & ~255;
@@ -1117,10 +1241,8 @@ void SponzaApp::UpdateCameraMovement(float deltaTime)
     if (!forwardPressed && !backwardPressed && !leftPressed && !rightPressed)
         return;
 
-    XMVECTOR forward = XMVectorSubtract(
-        XMLoadFloat3(&mCameraTarget), XMLoadFloat3(&mEyePos));
-    forward = XMVector3Normalize(forward);
-
+    XMVECTOR forward = XMVector3Normalize(XMVectorSubtract(
+        XMLoadFloat3(&mCameraTarget), XMLoadFloat3(&mEyePos)));
     const XMVECTOR up = XMVectorSet(0.f, 1.f, 0.f, 0.f);
     const XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, forward));
     XMVECTOR movement = XMVectorZero();
@@ -1397,7 +1519,9 @@ void SponzaApp::UpdateVisibleInstances(const XMMATRIX& viewProj)
 
 void SponzaApp::UpdateWindowCaption()
 {
-    mMainWndCaption = L"Sponza - WASD: move | LMB: shoot | RMB: orbit | F: wireframe"
+    mMainWndCaption = L"Sponza - WASD: move | LMB: shoot | RMB: orbit | T: observer "
+        + std::wstring(mObserverVisible ? L"ON" : L"OFF")
+        + L" | F: wireframe"
         L" | C: culling " + std::wstring(mFrustumCullingEnabled ? L"ON" : L"OFF")
         + L" | O: octree " + std::wstring(mOctreeCullingEnabled ? L"ON" : L"OFF")
         + L" | P: particles " + std::wstring(mParticlesEnabled ? L"ON" : L"OFF")

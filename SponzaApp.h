@@ -26,6 +26,8 @@ struct SubMesh
     UINT     IndexCount;
     XMFLOAT3 DiffuseColor;
     int      TextureIndex;
+    // Only vase_plant meshes cast into the separate textured-shadow map.
+    bool     MarkedShadowCaster = false;
 };
 
 struct CollisionTriangle
@@ -190,7 +192,8 @@ private:
 
 private:
     static const int kMaxTextures = 128;
-    static const int kStaticPointLights = 6;
+    // Six scene lights plus two bright lamps above the outer flower vases.
+    static const int kStaticPointLights = 8;
     static const int kMaxShotLights = 16 - kStaticPointLights;
     static const int kGBufferSrvStart = 2 + kMaxTextures;
     static const int kLightCbvIndex = kGBufferSrvStart + GBuffer::BufferCount;
@@ -199,7 +202,8 @@ private:
     static const int kTessellationDisplacementIndex = kTessellationNormalIndex + 1;
     static const int kTessellationCbvIndex = kTessellationDisplacementIndex + 1;
     static const int kShadowMapSrvIndex = kTessellationCbvIndex + 1;
-    static const int kParticleBufferSrvStart = kShadowMapSrvIndex + 1;
+    static const int kMarkedShadowMapSrvIndex = kShadowMapSrvIndex + 1;
+    static const int kParticleBufferSrvStart = kMarkedShadowMapSrvIndex + 1;
     static const int kParticleBufferUavStart = kParticleBufferSrvStart + 2;
     static const int kTotalSrvSlots = kParticleBufferUavStart + 2;
     static const UINT kCascadeCount = 3;
@@ -249,6 +253,9 @@ private:
 
     ComPtr<ID3D12Resource> mShadowMap;
     ComPtr<ID3D12DescriptorHeap> mShadowDsvHeap;
+    // A second depth map contains only the marked flower-vase casters.
+    ComPtr<ID3D12Resource> mMarkedShadowMap;
+    ComPtr<ID3D12DescriptorHeap> mMarkedShadowDsvHeap;
     ComPtr<ID3D12Resource> mShadowConstantBuffer;
     BYTE* mShadowCbMappedData = nullptr;
     UINT mShadowCbStride = 0;
@@ -282,6 +289,7 @@ private:
     bool mParticlesEnabled = true;
     bool mGammaCorrectionEnabled = true;
     bool mVignetteEnabled = true;
+    bool mMarkedShadowTextureEnabled = true;
     // Independent top-down observer. Only the main camera determines the visible instance list.
     bool mObserverVisible = true;
     float mObserverHalfExtent = 5500.f;

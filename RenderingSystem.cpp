@@ -259,11 +259,17 @@ void RenderingSystem::BuildLightingRootSignature(ID3D12Device* device)
     lightCbvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1);
     CD3DX12_DESCRIPTOR_RANGE shadowRange;
     shadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);
+    CD3DX12_DESCRIPTOR_RANGE markedShadowRange;
+    markedShadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
+    CD3DX12_DESCRIPTOR_RANGE markedShadowTextureRange;
+    markedShadowTextureRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5);
 
-    CD3DX12_ROOT_PARAMETER params[3];
+    CD3DX12_ROOT_PARAMETER params[5];
     params[0].InitAsDescriptorTable(1, &gbufferRange, D3D12_SHADER_VISIBILITY_PIXEL);
     params[1].InitAsDescriptorTable(1, &lightCbvRange, D3D12_SHADER_VISIBILITY_PIXEL);
     params[2].InitAsDescriptorTable(1, &shadowRange, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[3].InitAsDescriptorTable(1, &markedShadowRange, D3D12_SHADER_VISIBILITY_PIXEL);
+    params[4].InitAsDescriptorTable(1, &markedShadowTextureRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -283,7 +289,7 @@ void RenderingSystem::BuildLightingRootSignature(ID3D12Device* device)
     shadowSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC samplers[] = { sampler, shadowSampler };
 
-    CD3DX12_ROOT_SIGNATURE_DESC desc(3, params, 2, samplers,
+    CD3DX12_ROOT_SIGNATURE_DESC desc(5, params, 2, samplers,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     ComPtr<ID3DBlob> serialized, errors;
     ThrowIfFailedRS(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -324,7 +330,7 @@ void RenderingSystem::BuildParticleRootSignatures(ID3D12Device* device)
         serialized->GetBufferSize(), IID_PPV_ARGS(&mParticleComputeRootSignature)));
 
     CD3DX12_DESCRIPTOR_RANGE particleSrvRange;
-    particleSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
+    particleSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 6);
     CD3DX12_ROOT_PARAMETER particleParams[2];
     particleParams[0].InitAsConstantBufferView(3);
     particleParams[1].InitAsDescriptorTable(1, &particleSrvRange,

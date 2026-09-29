@@ -184,6 +184,8 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
         mGammaCorrectionEnabled = !mGammaCorrectionEnabled;
     else if (key == 'V')
         mVignetteEnabled = !mVignetteEnabled;
+    else if (key == 'M')
+        mMarkedShadowTextureEnabled = !mMarkedShadowTextureEnabled;
     else if (key == 'T')
         mObserverVisible = !mObserverVisible;
 
@@ -250,30 +252,37 @@ void SponzaApp::OnMouseWheel(short delta)
 void SponzaApp::BuildLights()
 {
     mLights = {};
-    mLights.DirLightDir = { 0.3f, 1.0f, 20.4f };
-    mLights.DirLightColor = { 0.25f, 0.25f, 0.28f };
+    // Direction of the sun rays: from above toward +X/+Z.  A negative Y is
+    // important: the light is above the scene and vase shadows land on the floor.
+    mLights.DirLightDir = { 0.35f, -1.0f, 0.25f };
+    // Neutral warm daylight keeps the original Sponza textures from turning blue.
+    mLights.DirLightColor = { 0.65f, 0.62f, 0.56f };
 
     const XMFLOAT3 colors[] =
     {
         { 1.0f, 0.35f, 0.20f }, { 1.20f, 0.55f, 1.0f },
         { 1.25f, 1.0f, 0.35f }, { 1.0f, 0.85f, 0.25f },
-        { 1.0f, 0.25f, 0.75f }, { 1.35f, 1.0f, 1.0f }
+        { 1.0f, 0.25f, 0.75f }, { 1.35f, 1.0f, 1.0f },
+        // Separate warm lamps: above the two outer flower vases.
+        { 1.0f, 0.82f, 0.52f }, { 1.0f, 0.82f, 0.52f }
     };
 
     const XMFLOAT3 positions[] =
     {
         { -600.f, 220.f, -250.f }, { -250.f, 160.f,  320.f },
         {  120.f, 240.f, -420.f }, {  430.f, 180.f,  280.f },
-        {  690.f, 260.f,  -80.f }, { -720.f, 190.f,  140.f }
+        {  690.f, 260.f,  -80.f }, { -720.f, 190.f,  140.f },
+        // Vase centers: sponza_366 and sponza_371 (the extreme left/right ones).
+        { -961.f, 300.f, -228.f }, {  834.f, 300.f, -222.f }
     };
 
     mLights.PointCount = (float)kStaticPointLights;
     for (int i = 0; i < kStaticPointLights; ++i)
     {
         mLights.Points[i].Position = positions[i];
-        mLights.Points[i].Radius = 650.f;
+        mLights.Points[i].Radius = i < 6 ? 650.f : 520.f;
         mLights.Points[i].Color = colors[i];
-        mLights.Points[i].Intensity = 2.5f;
+        mLights.Points[i].Intensity = i < 6 ? 2.5f : 8.0f;
     }
 
     mLights.SpotCount = 1.0f;
@@ -337,7 +346,8 @@ void SponzaApp::Update(const GameTimer& gt)
         mLights.ShadowViewProj[i] = mCascadeLightViewProj[i];
     mLights.CascadeSplits = mCascadeSplits;
     mLights.PostProcess = { mGammaCorrectionEnabled ? 1.0f : 0.0f,
-        mVignetteEnabled ? 1.0f : 0.0f, 0.0f, 0.0f };
+        mVignetteEnabled ? 1.0f : 0.0f,
+        mMarkedShadowTextureEnabled ? 1.0f : 0.0f, 0.0f };
     mRenderingSystem.UpdateLights(md3dDevice.Get(), mSrvHeap.Get(),
         kLightCbvIndex, mCbvSrvUavDescriptorSize, mLights);
 
@@ -474,6 +484,15 @@ void SponzaApp::Draw(const GameTimer& gt)
         mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
         kShadowMapSrvIndex, mCbvSrvUavDescriptorSize);
     mCommandList->SetGraphicsRootDescriptorTable(2, shadowMapSrv);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE markedShadowMapSrv(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        kMarkedShadowMapSrvIndex, mCbvSrvUavDescriptorSize);
+    mCommandList->SetGraphicsRootDescriptorTable(3, markedShadowMapSrv);
+    // Reuse the already loaded brick albedo as the projected shadow texture.
+    CD3DX12_GPU_DESCRIPTOR_HANDLE markedShadowTexture(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        kTessellationAlbedoIndex, mCbvSrvUavDescriptorSize);
+    mCommandList->SetGraphicsRootDescriptorTable(4, markedShadowTexture);
 
     mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     mCommandList->IASetVertexBuffers(0, 0, nullptr);
@@ -803,12 +822,17 @@ void SponzaApp::BuildShadowResources()
     ThrowIfFailed(md3dDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
         &desc, D3D12_RESOURCE_STATE_GENERIC_READ, &clearValue,
         IID_PPV_ARGS(&mShadowMap)));
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+        &desc, D3D12_RESOURCE_STATE_GENERIC_READ, &clearValue,
+        IID_PPV_ARGS(&mMarkedShadowMap)));
 
     D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
     dsvHeapDesc.NumDescriptors = kCascadeCount;
     dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&dsvHeapDesc,
         IID_PPV_ARGS(&mShadowDsvHeap)));
+    ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&dsvHeapDesc,
+        IID_PPV_ARGS(&mMarkedShadowDsvHeap)));
     const UINT dsvSize = md3dDevice->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
     for (UINT i = 0; i < kCascadeCount; ++i)
@@ -821,6 +845,9 @@ void SponzaApp::BuildShadowResources()
         CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
             mShadowDsvHeap->GetCPUDescriptorHandleForHeapStart(), i, dsvSize);
         md3dDevice->CreateDepthStencilView(mShadowMap.Get(), &dsvDesc, handle);
+        CD3DX12_CPU_DESCRIPTOR_HANDLE markedHandle(
+            mMarkedShadowDsvHeap->GetCPUDescriptorHandleForHeapStart(), i, dsvSize);
+        md3dDevice->CreateDepthStencilView(mMarkedShadowMap.Get(), &dsvDesc, markedHandle);
     }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -833,6 +860,10 @@ void SponzaApp::BuildShadowResources()
         mSrvHeap->GetCPUDescriptorHandleForHeapStart(), kShadowMapSrvIndex,
         mCbvSrvUavDescriptorSize);
     md3dDevice->CreateShaderResourceView(mShadowMap.Get(), &srvDesc, srvHandle);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE markedSrvHandle(
+        mSrvHeap->GetCPUDescriptorHandleForHeapStart(), kMarkedShadowMapSrvIndex,
+        mCbvSrvUavDescriptorSize);
+    md3dDevice->CreateShaderResourceView(mMarkedShadowMap.Get(), &srvDesc, markedSrvHandle);
 
     mShadowViewport = { 0.0f, 0.0f, (float)kShadowMapSize, (float)kShadowMapSize, 0.0f, 1.0f };
     mShadowScissor = { 0, 0, (LONG)kShadowMapSize, (LONG)kShadowMapSize };
@@ -911,10 +942,15 @@ void SponzaApp::DrawShadowMaps()
 {
     auto toDepth = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
         D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    mCommandList->ResourceBarrier(1, &toDepth);
+    auto markedToDepth = CD3DX12_RESOURCE_BARRIER::Transition(mMarkedShadowMap.Get(),
+        D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    D3D12_RESOURCE_BARRIER toDepthBarriers[] = { toDepth, markedToDepth };
+    mCommandList->ResourceBarrier(_countof(toDepthBarriers), toDepthBarriers);
     const UINT dsvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
     for (UINT cascade = 0; cascade < kCascadeCount; ++cascade)
     {
+        // The standard CSM intentionally omits marked vases. Their silhouette is
+        // written to the second map below and becomes a projected texture mask.
         CD3DX12_CPU_DESCRIPTOR_HANDLE dsv(mShadowDsvHeap->GetCPUDescriptorHandleForHeapStart(),
             cascade, dsvSize);
         mRenderingSystem.BeginShadowPass(mCommandList.Get(), dsv, mShadowViewport, mShadowScissor);
@@ -924,11 +960,28 @@ void SponzaApp::DrawShadowMaps()
         mCommandList->IASetVertexBuffers(0, 1, &mVbView);
         mCommandList->IASetIndexBuffer(&mIbView);
         for (const auto& submesh : mSubMeshes)
-            mCommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexStart, 0, 0);
+            if (!submesh.MarkedShadowCaster)
+                mCommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexStart, 0, 0);
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE markedDsv(
+            mMarkedShadowDsvHeap->GetCPUDescriptorHandleForHeapStart(), cascade, dsvSize);
+        mRenderingSystem.BeginShadowPass(mCommandList.Get(), markedDsv,
+            mShadowViewport, mShadowScissor);
+        mCommandList->SetGraphicsRootConstantBufferView(0,
+            mShadowConstantBuffer->GetGPUVirtualAddress() + cascade * mShadowCbStride);
+        mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        mCommandList->IASetVertexBuffers(0, 1, &mVbView);
+        mCommandList->IASetIndexBuffer(&mIbView);
+        for (const auto& submesh : mSubMeshes)
+            if (submesh.MarkedShadowCaster)
+                mCommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexStart, 0, 0);
     }
     auto toRead = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
         D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
-    mCommandList->ResourceBarrier(1, &toRead);
+    auto markedToRead = CD3DX12_RESOURCE_BARRIER::Transition(mMarkedShadowMap.Get(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
+    D3D12_RESOURCE_BARRIER toReadBarriers[] = { toRead, markedToRead };
+    mCommandList->ResourceBarrier(_countof(toReadBarriers), toReadBarriers);
 }
 
 void SponzaApp::DrawParticles()
@@ -1527,6 +1580,8 @@ void SponzaApp::UpdateWindowCaption()
         + L" | P: particles " + std::wstring(mParticlesEnabled ? L"ON" : L"OFF")
         + L" | G: gamma " + std::wstring(mGammaCorrectionEnabled ? L"ON" : L"OFF")
         + L" | V: vignette " + std::wstring(mVignetteEnabled ? L"ON" : L"OFF")
+        + L" | M: vase shadow texture "
+        + std::wstring(mMarkedShadowTextureEnabled ? L"ON" : L"OFF")
         + L" | cubes: " + std::to_wstring(mVisibleObjectCount)
         + L"/" + std::to_wstring(mSceneObjects.size());
 }
@@ -1566,6 +1621,10 @@ void SponzaApp::LoadModel(const std::string& objPath)
         if (matId >= 0 && matId < (int)materials.size())
         {
             auto& mat = materials[matId];
+
+            // The small flower vases from the task screenshot are the marked casters.
+            // They receive a separate shadow map instead of the ordinary CSM map.
+            sm.MarkedShadowCaster = mat.diffuse_texname.find("vase_plant") != std::string::npos;
 
             sm.DiffuseColor = {
                 mat.diffuse[0] > 0.01f ? mat.diffuse[0] : 1.f,

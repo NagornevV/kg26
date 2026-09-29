@@ -62,12 +62,14 @@ Texture2D    gTexture0   : register(t0);
 Texture2D    gTexture1   : register(t1);
 Texture2D    gTexture2   : register(t2);
 Texture2DArray<float> gShadowMap : register(t3);
+Texture2DArray<float> gMarkedShadowMap : register(t4);
+Texture2D gMarkedShadowTexture : register(t5);
 struct ParticleGPU
 {
     float3 Position; float Age;
     float3 Velocity; float Lifetime;
 };
-StructuredBuffer<ParticleGPU> gParticles : register(t4);
+StructuredBuffer<ParticleGPU> gParticles : register(t6);
 ConsumeStructuredBuffer<ParticleGPU> gParticleInput : register(u0);
 AppendStructuredBuffer<ParticleGPU> gParticleOutput : register(u1);
 SamplerState gSampler    : register(s0);
@@ -424,6 +426,37 @@ float CalcShadow(float3 posW, float3 normalW)
     return visibility / 9.0f;
 }
 
+// Same CSM projection as CalcShadow, but this depth map contains only vase_plant.
+// The output UV is reused to project a visible texture into the vase shadow.
+float CalcMarkedShadow(float3 posW, float3 normalW, out float2 projectedUv)
+{
+    projectedUv = float2(0.0f, 0.0f);
+    float viewDepth = abs(mul(float4(posW, 1.0f), gCameraView).z);
+    uint cascade = (viewDepth < gCascadeSplits.x) ? 0
+        : ((viewDepth < gCascadeSplits.y) ? 1 : 2);
+
+    float4 shadowPos = mul(float4(posW, 1.0f), gShadowViewProj[cascade]);
+    shadowPos.xyz /= max(shadowPos.w, 0.0001f);
+    float2 uv = shadowPos.xy * float2(0.5f, -0.5f) + 0.5f;
+    if (uv.x <= 0.0f || uv.x >= 1.0f || uv.y <= 0.0f || uv.y >= 1.0f
+        || shadowPos.z <= 0.0f || shadowPos.z >= 1.0f)
+        return 0.0f;
+
+    float bias = max(0.00035f, 0.0025f * (1.0f - dot(normalW, normalize(-gDirLightDir))));
+    float2 texel = 1.0f / 2048.0f;
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+            visibility += gMarkedShadowMap.SampleCmpLevelZero(gShadowSampler,
+                float3(uv + float2(x, y) * texel, cascade), shadowPos.z - bias);
+    }
+    projectedUv = uv;
+    return 1.0f - visibility / 9.0f;
+}
+
 // Independent observer camera. Culling still uses the primary camera on the CPU.
 cbuffer CBObserver : register(b5)
 {
@@ -478,6 +511,21 @@ float4 LightingPS(LightVSOut pin) : SV_Target
             lighting += CalcSpot(gSpots[s], posW, normalW, viewDir);
 
         finalColor = saturate(albedo * lighting);
+
+        // The ordinary CSM excludes marked vases. Their shadow mask instead reveals
+        // a projected brick texture. Limit it to upward-facing surfaces so the
+        // demonstration reads as a shadow on the floor rather than wall decals.
+        if (gPostProcess.z > 0.5f && normalW.y > 0.75f)
+        {
+            float2 markedUv;
+            float markedShadow = CalcMarkedShadow(posW, normalW, markedUv);
+            float3 shadowTexture = gMarkedShadowTexture.Sample(gSampler,
+                frac(markedUv * 8.0f)).rgb;
+            // Show the actual texture in the silhouette while keeping it dark enough
+            // to read as a shadow. This is deliberately more contrasty for the demo.
+            float3 texturedShadow = shadowTexture * 0.42f;
+            finalColor = lerp(finalColor, texturedShadow, markedShadow * 0.96f);
+        }
     }
 
     // Post-effect 1: final gamma correction from linear color to display space.

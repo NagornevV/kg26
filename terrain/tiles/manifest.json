@@ -1,0 +1,19 @@
+{
+  "source": "../heightmap.png",
+  "sourceWidth": 1025,
+  "sourceHeight": 1025,
+  "tilesX": 16,
+  "tilesZ": 16,
+  "tileWidth": 65,
+  "tileHeight": 65,
+  "sampleFormat": "uint16_little_endian",
+  "headerBytes": 0,
+  "sharedEdgeSamples": 1,
+  "naming": "height_{x}_{z}.r16",
+  "worldSize": 8192,
+  "worldOriginXZ": [1800, -4096],
+  "heightScale": 1800,
+  "heightOffset": -70,
+  "subtractGlobalMinimum": true,
+  "rowOrder": "same_as_source_png"
+}

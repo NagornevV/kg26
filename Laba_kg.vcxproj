@@ -140,6 +140,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="SponzaApp.cpp" />
+    <ClCompile Include="TerrainMesh.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="D3DApp.h" />
@@ -147,6 +148,7 @@
     <ClInclude Include="GBuffer.h" />
     <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="SponzaApp.h" />
+    <ClInclude Include="TerrainMesh.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -169,6 +171,7 @@
     <ItemGroup>
       <SponzaAsset Include="$(ProjectDir)sponza\**\*" />
       <TessellationAsset Include="$(ProjectDir)tessellation\**\*" />
+      <TerrainAsset Include="$(ProjectDir)terrain\*.png" />
     </ItemGroup>
     <Copy SourceFiles="$(ProjectDir)shader.hlsl"
           DestinationFiles="$(OutDir)shader.hlsl"
@@ -178,6 +181,9 @@
           SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(TessellationAsset)"
           DestinationFiles="@(TessellationAsset->'$(OutDir)tessellation\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(TerrainAsset)"
+          DestinationFiles="@(TerrainAsset->'$(OutDir)terrain\%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 </Project>

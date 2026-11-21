@@ -38,6 +38,12 @@ cbuffer CBFrameLights : register(b1)
     float4     gPostProcess;
 };
 
+// The command list captures a separate color for every draw.
+cbuffer CBDrawColor : register(b6)
+{
+    float3 gDrawColor;
+};
+
 cbuffer CBShadow : register(b2)
 {
     float4x4 gLightViewProj;
@@ -131,7 +137,7 @@ GBufferOut GeometryPS(GeoVSOut pin)
         }
     }
 
-    gout.Albedo   = float4(texColor.rgb * gObjectColor, texColor.a);
+    gout.Albedo   = float4(texColor.rgb * gDrawColor, texColor.a);
     gout.Normal   = float4(normalW * 0.5f + 0.5f, 1.0f);
     gout.Position = float4(pin.PosW, 1.0f);
     return gout;

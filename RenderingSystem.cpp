@@ -80,6 +80,13 @@ void RenderingSystem::BeginGeometryPass(ID3D12GraphicsCommandList* cmdList, GBuf
     cmdList->OMSetRenderTargets(GBuffer::BufferCount, rtvs, false, &dsv);
 }
 
+void RenderingSystem::BeginTerrainPass(ID3D12GraphicsCommandList* cmdList, bool wireframe)
+{
+    // Preserve existing GBuffer/depth so terrain and Sponza share the same scene.
+    cmdList->SetPipelineState(wireframe ? mGeometryWirePSO.Get() : mGeometryPSO.Get());
+    cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
+}
+
 void RenderingSystem::BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, bool wireframe)
 {
     cmdList->SetPipelineState(wireframe ? mTessellationWirePSO.Get() : mTessellationPSO.Get());
@@ -228,11 +235,12 @@ void RenderingSystem::BuildGeometryRootSignature(ID3D12Device* device)
     CD3DX12_DESCRIPTOR_RANGE displacementRange;
     displacementRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
 
-    CD3DX12_ROOT_PARAMETER params[4];
+    CD3DX12_ROOT_PARAMETER params[5];
     params[0].InitAsDescriptorTable(1, &cbvRange, D3D12_SHADER_VISIBILITY_ALL);
     params[1].InitAsDescriptorTable(1, &albedoRange, D3D12_SHADER_VISIBILITY_PIXEL);
     params[2].InitAsDescriptorTable(1, &normalRange, D3D12_SHADER_VISIBILITY_PIXEL);
     params[3].InitAsDescriptorTable(1, &displacementRange, D3D12_SHADER_VISIBILITY_ALL);
+    params[4].InitAsConstants(3, 6, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -242,7 +250,7 @@ void RenderingSystem::BuildGeometryRootSignature(ID3D12Device* device)
     sampler.ShaderRegister = 0;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    CD3DX12_ROOT_SIGNATURE_DESC desc(4, params, 1, &sampler,
+    CD3DX12_ROOT_SIGNATURE_DESC desc(5, params, 1, &sampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     ComPtr<ID3DBlob> serialized, errors;
     ThrowIfFailedRS(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,

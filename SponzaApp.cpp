@@ -65,6 +65,8 @@ SponzaApp::~SponzaApp()
 
     if (mObserverLinesMapped)
         mObserverLines->Unmap(0, nullptr);
+    if (mTerrainCbMappedData)
+        mTerrainConstantBuffer->Unmap(0, nullptr);
 
     if (mCbMappedData)
     {
@@ -135,6 +137,7 @@ bool SponzaApp::Initialize()
     BuildOctree();
     BuildInstanceBuffer();
     BuildLights();
+    BuildTerrain();
 
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
@@ -147,6 +150,8 @@ bool SponzaApp::Initialize()
     mCubeVertexUpload.Reset();
     mCubeIndexUpload.Reset();
     mTextureUploads.clear();
+    mTerrainVertexUpload.Reset();
+    mTerrainIndexUpload.Reset();
     mParticleInitialUpload.Reset();
     mParticleCounterUpload.Reset();
 
@@ -160,7 +165,7 @@ void SponzaApp::OnResize()
 {
     D3DApp::OnResize();
     XMMATRIX proj = XMMatrixPerspectiveFovLH(
-        XM_PIDIV4, AspectRatio(), 1.f, 10000.f);
+        XM_PIDIV4, AspectRatio(), 1.f, 30000.f);
     XMStoreFloat4x4(&mProj, proj);
 
     if (md3dDevice != nullptr && mSrvHeap != nullptr)
@@ -188,6 +193,24 @@ void SponzaApp::OnKeyboardInput(WPARAM key)
         mMarkedShadowTextureEnabled = !mMarkedShadowTextureEnabled;
     else if (key == 'T')
         mObserverVisible = !mObserverVisible;
+    else if (key == VK_F2)
+        mTerrainCulling = !mTerrainCulling;
+    else if (key == 'L')
+        mTerrainAdaptiveLod = !mTerrainAdaptiveLod;
+    else if (key == 'K')
+        mTerrainSkirts = !mTerrainSkirts;
+    else if (key == 'B')
+        mTerrainLodColors = !mTerrainLodColors;
+    else if (key == 'H')
+    {
+        mCameraTarget = { 5896.f, 400.f, 0.f };
+        mRadius = 6000.f; mPitch = 0.55f; mYaw = XM_PI;
+    }
+    else if (key == 'J')
+    {
+        mCameraTarget = { 0.f, 100.f, 0.f };
+        mRadius = 1000.f; mPitch = -0.1f; mYaw = 0.f;
+    }
 
     UpdateWindowCaption();
     SetWindowText(mhMainWnd, mMainWndCaption.c_str());
@@ -245,7 +268,7 @@ void SponzaApp::OnMouseWheel(short delta)
         return;
     }
     mRadius -= delta * mZoomSpeed * 0.01f;
-    mRadius = std::clamp(mRadius, 100.f, 3000.f);
+    mRadius = std::clamp(mRadius, 100.f, 20000.f);
 }
 
 // =============================================================
@@ -318,6 +341,7 @@ void SponzaApp::Update(const GameTimer& gt)
     UpdateShotLights(gt.DeltaTime());
     UpdateCascades(view, proj);
     UpdateVisibleInstances(view * proj);
+    mTerrain.Select(mEyePos, view * proj, mTerrainCulling, mTerrainAdaptiveLod, mTerrainSkirts);
     if (mObserverVisible)
         UpdateCullingObserver(view * proj);
 
@@ -332,6 +356,10 @@ void SponzaApp::Update(const GameTimer& gt)
     cb.DisplacementScale = 0.f;
     cb.RenderTargetSize = { static_cast<float>(mClientWidth), static_cast<float>(mClientHeight) };
     memcpy(mCbMappedData, &cb, sizeof(CBPerObject));
+    CBPerObject terrainCb = cb;
+    terrainCb.UVScale = { 1.f, 1.f };
+    terrainCb.UVOffset = { 0.f, 0.f };
+    memcpy(mTerrainCbMappedData, &terrainCb, sizeof(terrainCb));
 
     CBPerObject tessellationCb = cb;
     tessellationCb.UVScale = { 5.f, 5.f };
@@ -400,7 +428,8 @@ void SponzaApp::Draw(const GameTimer& gt)
 
     for (auto& sm : mSubMeshes)
     {
-        reinterpret_cast<CBPerObject*>(mCbMappedData)->ObjectColor = sm.DiffuseColor;
+        // Root constants capture this material's color, avoiding the old blue Sponza bug.
+        mCommandList->SetGraphicsRoot32BitConstants(4, 3, &sm.DiffuseColor, 0);
 
         CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(
             mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
@@ -428,7 +457,8 @@ void SponzaApp::Draw(const GameTimer& gt)
         mCommandList->SetGraphicsRootDescriptorTable(2, whiteHandle);
         mCommandList->SetGraphicsRootDescriptorTable(3, whiteHandle);
 
-        reinterpret_cast<CBPerObject*>(mCbMappedData)->ObjectColor = { 0.18f, 0.72f, 1.0f };
+        const XMFLOAT3 cubeColor = { 0.18f, 0.72f, 1.0f };
+        mCommandList->SetGraphicsRoot32BitConstants(4, 3, &cubeColor, 0);
         D3D12_VERTEX_BUFFER_VIEW views[] = { mCubeVbView, mInstanceVbView };
         mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         mCommandList->IASetVertexBuffers(0, 2, views);
@@ -438,6 +468,8 @@ void SponzaApp::Draw(const GameTimer& gt)
 
     // ---------- Tessellation pass: displacement + normal map ----------
     mRenderingSystem.BeginTessellationPass(mCommandList.Get(), mWireframe);
+    const XMFLOAT3 surfaceColor = { 1.f, 1.f, 1.f };
+    mCommandList->SetGraphicsRoot32BitConstants(4, 3, &surfaceColor, 0);
 
     CD3DX12_GPU_DESCRIPTOR_HANDLE tessellationCbv(
         mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
@@ -464,6 +496,8 @@ void SponzaApp::Draw(const GameTimer& gt)
     // ---------- Particle pass: compute update + geometry-shader billboards ----------
     if (mParticlesEnabled)
         DrawParticles();
+
+    DrawTerrain();
 
     // ---------- 2. Lighting pass: читаем GBuffer и выводим свет на экран ----------
     mGBuffer.TransitionToShaderResources(mCommandList.Get());
@@ -514,6 +548,63 @@ void SponzaApp::Draw(const GameTimer& gt)
     ThrowIfFailed(mSwapChain->Present(1, 0));
     mCurrBackBuffer = (mCurrBackBuffer + 1) % kSwapChainBufferCount;
     FlushCommandQueue();
+}
+
+void SponzaApp::BuildTerrain()
+{
+    mTerrain.Load("terrain/heightmap.png");
+    int colorWidth = 0, colorHeight = 0, channels = 0;
+    if (!stbi_info("terrain/colormap.png", &colorWidth, &colorHeight, &channels)
+        || colorWidth != mTerrain.Resolution() || colorHeight != mTerrain.Resolution()
+        || !LoadTexture("terrain/colormap.png", kTerrainColorSrvIndex))
+        throw std::runtime_error("Terrain: colormap missing or dimensions differ from heightmap");
+    const UINT vertexBytes = static_cast<UINT>(mTerrain.Vertices.size() * sizeof(TerrainVertex));
+    const UINT indexBytes = static_cast<UINT>(mTerrain.Indices.size() * sizeof(uint32_t));
+    UploadBufferData(mTerrainVertexBuffer, mTerrainVertexUpload, mTerrain.Vertices.data(),
+        vertexBytes, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    UploadBufferData(mTerrainIndexBuffer, mTerrainIndexUpload, mTerrain.Indices.data(),
+        indexBytes, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+    mTerrainVbView = { mTerrainVertexBuffer->GetGPUVirtualAddress(), vertexBytes, sizeof(TerrainVertex) };
+    mTerrainIbView = { mTerrainIndexBuffer->GetGPUVirtualAddress(), indexBytes, DXGI_FORMAT_R32_UINT };
+    CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_UPLOAD);
+    const UINT cbSize = (sizeof(CBPerObject) + 255) & ~255;
+    auto desc = CD3DX12_RESOURCE_DESC::Buffer(cbSize);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mTerrainConstantBuffer)));
+    ThrowIfFailed(mTerrainConstantBuffer->Map(0, nullptr,
+        reinterpret_cast<void**>(&mTerrainCbMappedData)));
+    D3D12_CONSTANT_BUFFER_VIEW_DESC cbv = { mTerrainConstantBuffer->GetGPUVirtualAddress(), cbSize };
+    CD3DX12_CPU_DESCRIPTOR_HANDLE handle(mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        kTerrainCbvIndex, mCbvSrvUavDescriptorSize);
+    md3dDevice->CreateConstantBufferView(&cbv, handle);
+}
+
+void SponzaApp::DrawTerrain()
+{
+    mRenderingSystem.BeginTerrainPass(mCommandList.Get(), mWireframe);
+    const auto heapStart = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
+    mCommandList->SetGraphicsRootDescriptorTable(0, CD3DX12_GPU_DESCRIPTOR_HANDLE(
+        heapStart, kTerrainCbvIndex, mCbvSrvUavDescriptorSize));
+    mCommandList->SetGraphicsRootDescriptorTable(1, CD3DX12_GPU_DESCRIPTOR_HANDLE(
+        heapStart, mTerrainLodColors ? 1 : kTerrainColorSrvIndex, mCbvSrvUavDescriptorSize));
+    const CD3DX12_GPU_DESCRIPTOR_HANDLE white(heapStart, 1, mCbvSrvUavDescriptorSize);
+    mCommandList->SetGraphicsRootDescriptorTable(2, white);
+    mCommandList->SetGraphicsRootDescriptorTable(3, white);
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    mCommandList->IASetVertexBuffers(0, 1, &mTerrainVbView);
+    mCommandList->IASetIndexBuffer(&mTerrainIbView);
+    const XMFLOAT3 lodColors[] = {
+        { 0.25f, 0.4f, 1.f }, { 0.2f, 0.85f, 1.f }, { 0.25f, 0.9f, 0.3f },
+        { 1.f, 0.8f, 0.15f }, { 1.f, 0.25f, 0.2f }
+    };
+    for (int index : mTerrain.Selected)
+    {
+        const auto& node = mTerrain.Nodes[index];
+        const XMFLOAT3 color = mTerrainLodColors ? lodColors[node.Depth] : XMFLOAT3{ 1.f, 1.f, 1.f };
+        mCommandList->SetGraphicsRoot32BitConstants(4, 3, &color, 0);
+        const UINT count = node.SurfaceIndexCount + (mTerrainSkirts ? node.SkirtIndexCount : 0);
+        mCommandList->DrawIndexedInstanced(count, 1, node.IndexStart, 0, 0);
+    }
 }
 
 void SponzaApp::BuildCullingObserver()
@@ -963,6 +1054,13 @@ void SponzaApp::DrawShadowMaps()
             if (!submesh.MarkedShadowCaster)
                 mCommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexStart, 0, 0);
 
+        // Shadow casters must not disappear when outside the main camera's frustum.
+        mCommandList->IASetVertexBuffers(0, 1, &mTerrainVbView);
+        mCommandList->IASetIndexBuffer(&mTerrainIbView);
+        for (const auto& node : mTerrain.Nodes)
+            if (node.Depth == TerrainMesh::MaxDepth)
+                mCommandList->DrawIndexedInstanced(node.SurfaceIndexCount, 1, node.IndexStart, 0, 0);
+
         CD3DX12_CPU_DESCRIPTOR_HANDLE markedDsv(
             mMarkedShadowDsvHeap->GetCPUDescriptorHandleForHeapStart(), cascade, dsvSize);
         mRenderingSystem.BeginShadowPass(mCommandList.Get(), markedDsv,
@@ -1305,7 +1403,8 @@ void SponzaApp::UpdateCameraMovement(float deltaTime)
     if (rightPressed) movement = XMVectorAdd(movement, right);
     if (leftPressed) movement = XMVectorSubtract(movement, right);
 
-    movement = XMVectorScale(XMVector3Normalize(movement), mCameraSpeed * deltaTime);
+    const float speedMultiplier = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 4.f : 1.f;
+    movement = XMVectorScale(XMVector3Normalize(movement), mCameraSpeed * speedMultiplier * deltaTime);
     XMStoreFloat3(&mCameraTarget,
         XMVectorAdd(XMLoadFloat3(&mCameraTarget), movement));
 }
@@ -1572,7 +1671,13 @@ void SponzaApp::UpdateVisibleInstances(const XMMATRIX& viewProj)
 
 void SponzaApp::UpdateWindowCaption()
 {
-    mMainWndCaption = L"Sponza - WASD: move | LMB: shoot | RMB: orbit | T: observer "
+    const auto& ts = mTerrain.Stats;
+    const std::wstring terrainCaption = L"Terrain: " + std::to_wstring(ts.Tiles)
+        + L" tiles, " + std::to_wstring(ts.Triangles) + L" tris | F2 cull "
+        + (mTerrainCulling ? L"ON" : L"OFF") + L" | L LOD "
+        + (mTerrainAdaptiveLod ? L"adaptive" : L"MAX") + L" | K skirts "
+        + (mTerrainSkirts ? L"ON" : L"OFF") + L" | B colors | H/J camera | ";
+    mMainWndCaption = terrainCaption + L"Sponza - WASD+Shift: move | LMB: shoot | RMB: orbit | T: observer "
         + std::wstring(mObserverVisible ? L"ON" : L"OFF")
         + L" | F: wireframe"
         L" | C: culling " + std::wstring(mFrustumCullingEnabled ? L"ON" : L"OFF")

@@ -10,6 +10,7 @@
 #include <memory>
 #include "GBuffer.h"
 #include "RenderingSystem.h"
+#include "TerrainMesh.h"
 
 using namespace DirectX;
 
@@ -159,6 +160,8 @@ private:
     void BuildInstanceBuffer();
     void BuildRenderingSystem();
     void BuildLights();
+    void BuildTerrain();
+    void DrawTerrain();
 
     void LoadModel(const std::string& objPath);
     bool LoadTexture(const std::string& path, int heapIndex);
@@ -205,13 +208,26 @@ private:
     static const int kMarkedShadowMapSrvIndex = kShadowMapSrvIndex + 1;
     static const int kParticleBufferSrvStart = kMarkedShadowMapSrvIndex + 1;
     static const int kParticleBufferUavStart = kParticleBufferSrvStart + 2;
-    static const int kTotalSrvSlots = kParticleBufferUavStart + 2;
+    static const int kTerrainColorSrvIndex = kParticleBufferUavStart + 2;
+    static const int kTerrainCbvIndex = kTerrainColorSrvIndex + 1;
+    static const int kTotalSrvSlots = kTerrainCbvIndex + 1;
     static const UINT kCascadeCount = 3;
     static const UINT kShadowMapSize = 2048;
     static const UINT kParticleCount = 512;
     static const UINT kParticleThreadsPerGroup = 64;
 
     ComPtr<ID3D12DescriptorHeap> mSrvHeap;
+    TerrainMesh mTerrain;
+    ComPtr<ID3D12Resource> mTerrainVertexBuffer, mTerrainIndexBuffer;
+    ComPtr<ID3D12Resource> mTerrainVertexUpload, mTerrainIndexUpload;
+    ComPtr<ID3D12Resource> mTerrainConstantBuffer;
+    BYTE* mTerrainCbMappedData = nullptr;
+    D3D12_VERTEX_BUFFER_VIEW mTerrainVbView = {};
+    D3D12_INDEX_BUFFER_VIEW mTerrainIbView = {};
+    bool mTerrainCulling = true;
+    bool mTerrainAdaptiveLod = true;
+    bool mTerrainSkirts = true;
+    bool mTerrainLodColors = false;
 
     std::vector<ComPtr<ID3D12Resource>>  mTextures;
     std::vector<ComPtr<ID3D12Resource>>  mTextureUploads;

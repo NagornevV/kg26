@@ -60,6 +60,7 @@ public:
         D3D12_CPU_DESCRIPTOR_HANDLE dsv, bool wireframe);
 
     void BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
+    void BeginTerrainPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
     void BeginInstancedGeometryPass(ID3D12GraphicsCommandList* cmdList, bool wireframe);
     void BeginParticleCompute(ID3D12GraphicsCommandList* cmdList,
         ID3D12DescriptorHeap* srvHeap, UINT inputUavIndex, UINT outputUavIndex,
